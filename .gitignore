@@ -1,0 +1,14 @@
+node_modules
+dist
+tests/e2e/out
+tests/perf/out
+tests/perf/bench.log
+*.log
+release/
+release-build.log
+
+# Added before GitHub publish (secrets)
+.env
+.env.*
+!.env.example
+*.db

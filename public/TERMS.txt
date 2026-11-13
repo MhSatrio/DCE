@@ -1,0 +1,143 @@
+DYNAMIC CANVAS ENGINE (DCE) - TERMS AND CONDITIONS OF USE
+
+Concept and product requirements (PRD): Muhammad Satrio
+Licence of the software: MIT (see below).  Price: free.
+
+Please read this carefully. By installing, copying or using DCE you confirm
+that you have read, understood and accepted all of it. If you do not accept,
+do not install or use the software.
+
+1. WHAT THIS IS
+   DCE is a free, open-source, local-first design and batch-generation
+   application. It is offered to the public as-is, at no charge, as a gift to
+   the community. Nobody is paid to support it and nobody has promised that it
+   will be maintained, updated, available or suitable for any purpose.
+
+2. CHECK YOUR OWN COMPUTER FIRST (YOUR RESPONSIBILITY)
+   Before installing you must make sure that your computer is suitable. As a
+   guide only, not a guarantee:
+     - Windows 10 or Windows 11, 64-bit.
+     - About 600 MB of free disk space for the program, plus space for your
+       data and for the files you generate.
+     - At least 4 GB of RAM; 8 GB or more is recommended for large batches
+       (rendering 1,000 images can use well over 1 GB of memory).
+     - A current graphics driver. Software rendering is used when there is no
+       GPU, which is slower.
+   Internet access is only needed for features that talk to online services
+   (for example publishing through Buffer). Everything else works offline.
+   You are responsible for checking compatibility, for backing up your system
+   and your data, and for deciding whether the software is safe and appropriate
+   for you before you install it.
+
+3. NO WARRANTY
+   THE SOFTWARE IS PROVIDED "AS IS" AND "AS AVAILABLE", WITHOUT WARRANTY OF ANY
+   KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+   MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE, ACCURACY, RELIABILITY,
+   NON-INFRINGEMENT AND UNINTERRUPTED OR ERROR-FREE OPERATION. It may contain
+   bugs. Generated images, files, posts and exports may be wrong, incomplete or
+   different from what you expected. Always check results before using or
+   publishing them.
+
+4. NO RESPONSIBILITY OR LIABILITY
+   TO THE MAXIMUM EXTENT PERMITTED BY APPLICABLE LAW, NEITHER MUHAMMAD SATRIO
+   (WHO PROVIDED THE CONCEPT AND PRODUCT REQUIREMENTS), NOR ANY CONTRIBUTOR,
+   NOR ANYONE WHO DISTRIBUTES THE SOFTWARE, IS RESPONSIBLE OR LIABLE FOR ANY
+   CLAIM, DAMAGE, LOSS OR COST OF ANY KIND, WHETHER IN CONTRACT, TORT OR
+   OTHERWISE, ARISING FROM OR CONNECTED WITH THE SOFTWARE, ITS INSTALLATION,
+   ITS UNINSTALLATION, ITS USE OR ITS INABILITY TO BE USED. This includes,
+   without limitation:
+     - problems or failures during or after installation or removal;
+     - damage to, or malfunction of, your computer, other software or files;
+     - loss, corruption or exposure of data, designs, templates, images,
+       records, settings, passwords, API keys or other credentials;
+     - posts published, scheduled, duplicated, mistimed, wrongly worded or not
+       published at all through automations or any connected service;
+     - suspension, restriction or deletion of any account on any service;
+     - fees, charges or penalties from third-party services;
+     - lost profit, lost business, lost reputation or any indirect,
+       incidental, special or consequential damage;
+     - claims by third parties about content you created or published.
+   Your only remedy if you are unhappy with the software is to stop using it
+   and uninstall it.
+
+5. YOUR DATA AND BACKUPS
+   DCE stores your data on your own computer, in the application's data
+   folder. Nothing is uploaded unless you use a feature that sends it
+   (for example a post to Buffer). Your data is NOT backed up for you.
+   Uninstalling with the "remove data" option, using "Erase all data",
+   clearing application data, a damaged disk or a failed update can delete it
+   permanently. Export and back up anything you care about.
+
+6. API KEYS AND ACCOUNTS
+   API keys and channel ids that you enter are encrypted before they are stored
+   and are hidden on screen. This reduces, but does not remove, risk: it does
+   not protect against malware, other people using your Windows account, or
+   anyone who has access to your unlocked computer. Deleting the application
+   data destroys the encryption key. You alone are responsible for your keys
+   and accounts. If you think a key was exposed, revoke it at the service.
+
+7. THIRD-PARTY SERVICES AND CONTENT
+   Buffer, Instagram, LinkedIn and every other service or platform that DCE can
+   connect to are independent of DCE; their names and marks belong to their
+   owners, and DCE is not affiliated with, endorsed by or sponsored by them.
+   You must follow their terms, API limits and community rules. Automations can
+   create REAL posts. You are solely responsible for what you publish,
+   including copyright, permissions, privacy, advertising and other laws, and
+   for testing automations (the dry run) before turning them on.
+
+8. UNSIGNED INSTALLER AND SECURITY WARNINGS
+   The installer may not be digitally signed. Windows SmartScreen or your
+   antivirus may therefore warn you. Only install files that you obtained from
+   a source you trust, and compare checksums if the publisher provides them.
+
+9. BRANDS
+   The MIT licence covers the source code. The names and logos "VierApparatus"
+   and "Dynamic Canvas Engine", the VierApparatus icon and wordmark, and any
+   other brand material that ships with the software are NOT licensed under
+   the MIT licence and may not be used to suggest endorsement or origin.
+
+10. OPEN-SOURCE AND THIRD-PARTY COMPONENTS
+   DCE includes open-source components (among them Electron / Chromium, React,
+   Fabric.js, Dexie, fflate, marked, DOMPurify, zod and the Jost typeface),
+   each under its own licence. Their licence texts are part of the installed
+   application.
+
+11. CHANGES
+   These terms and the software may change at any time. Continued use after a
+   change means you accept it.
+
+12. GENERAL
+   If any part of these terms is not enforceable where you live, the rest still
+   applies and the affected part applies only as far as the law allows. Nothing
+   here limits any right that the law gives you and that cannot be excluded.
+
+13. YOUR ACKNOWLEDGEMENT
+   By clicking "I Agree" / installing / using DCE you acknowledge that you have
+   read and understood these terms; that you use the software voluntarily and
+   entirely at your own risk; that you have checked that it suits your
+   computer; and that, as far as the law permits, you release Muhammad Satrio,
+   the contributors and the distributors from any responsibility described
+   above.
+
+--------------------------------------------------------------------------
+MIT LICENSE
+
+Copyright (c) 2026 Muhammad Satrio and contributors
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.

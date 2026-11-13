@@ -1,0 +1,107 @@
+{
+  "name": "dynamic-canvas-engine",
+  "version": "1.6.0",
+  "private": true,
+  "type": "module",
+  "description": "Dynamic Canvas Engine (DCE) - free, open-source, local-first design and batch-generation studio. Concept and product requirements: Muhammad Satrio.",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc --noEmit && vite build",
+    "preview": "vite preview --port 4173",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "e2e": "node tests/e2e/editor.mjs && node tests/e2e/batch.mjs && node tests/e2e/connect.mjs && node tests/e2e/pipeline.mjs",
+    "bench": "node tests/perf/bench.mjs",
+    "e2e:editor": "node tests/e2e/editor.mjs",
+    "e2e:batch": "node tests/e2e/batch.mjs",
+    "screens": "node tests/e2e/smoke.mjs",
+    "relay": "node server/relay.mjs",
+    "e2e:connect": "node tests/e2e/connect.mjs",
+    "legal": "node scripts/prepare-legal.mjs",
+    "icons": "node scripts/make-icons.mjs",
+    "desktop": "npm run build && electron .",
+    "dist:win": "node scripts/dist-win.mjs",
+    "e2e:pipeline": "node tests/e2e/pipeline.mjs"
+  },
+  "dependencies": {
+    "@fontsource-variable/jost": "^5.2.0",
+    "dexie": "^4.0.0",
+    "dexie-react-hooks": "^4.0.0",
+    "dompurify": "^3.2.0",
+    "fabric": "^6.9.1",
+    "fflate": "^0.8.2",
+    "lucide-react": "^0.468.0",
+    "marked": "^15.0.0",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0",
+    "zod": "^3.25.76"
+  },
+  "devDependencies": {
+    "@types/react": "^19.0.0",
+    "@types/react-dom": "^19.0.0",
+    "@vitejs/plugin-react": "^5.0.0",
+    "electron": "^45.2.3",
+    "electron-builder": "^26.18.0",
+    "playwright-core": "^1.50.0",
+    "typescript": "^5.7.0",
+    "vite": "^7.0.0",
+    "vitest": "^3.0.0"
+  },
+  "main": "desktop/main.cjs",
+  "license": "MIT",
+  "author": {
+    "name": "Muhammad Satrio (concept and product requirements)"
+  },
+  "build": {
+    "appId": "app.dce.desktop",
+    "productName": "Dynamic Canvas Engine",
+    "copyright": "MIT License. Concept and product requirements: Muhammad Satrio",
+    "directories": {
+      "output": "release",
+      "buildResources": "build"
+    },
+    "files": [
+      "dist/**/*",
+      "desktop/**/*",
+      "server/relay-core.cjs",
+      "package.json"
+    ],
+    "extraResources": [
+      {
+        "from": "LICENSE",
+        "to": "LICENSE.txt"
+      },
+      {
+        "from": "TERMS.txt",
+        "to": "TERMS.txt"
+      }
+    ],
+    "asar": true,
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "icon": "build/icon.ico"
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "Dynamic Canvas Engine",
+      "license": "build/installer-license.txt",
+      "runAfterFinish": true,
+      "deleteAppDataOnUninstall": false,
+      "installerIcon": "build/icon.ico",
+      "uninstallerIcon": "build/icon.ico",
+      "installerHeaderIcon": "build/icon.ico",
+      "artifactName": "Dynamic-Canvas-Engine-Setup-${version}.exe"
+    }
+  }
+}
