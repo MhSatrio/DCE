@@ -12,3 +12,7 @@ release-build.log
 .env.*
 !.env.example
 *.db
+
+# Word documentation stays on the PC only
+*.docx
+*.doc
