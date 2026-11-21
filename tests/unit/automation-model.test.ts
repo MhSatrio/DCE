@@ -51,7 +51,7 @@ describe('what a connection allows (the "Then" menu)', () => {
     expect(pick('g1')).toEqual(['gemini_fill']);
     expect(pick('h1')).toEqual(['http']);
     expect(pick('w1')).toEqual([]);
-    expect(pick('')).toEqual(['pipeline_post', 'add_row', 'set_field', 'random_time', 'sync_posts', 'render']);
+    expect(pick('')).toEqual(['pipeline_post', 'add_row', 'set_field', 'delete_record', 'random_time', 'sync_posts', 'render']);
   });
 
   it('a Buffer account without a channel is shown but cannot be chosen, with the reason', () => {

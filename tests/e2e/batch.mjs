@@ -306,7 +306,8 @@ await check('assets: non-image and oversized input are rejected with a message',
 await check('template .njs export → import round-trips the design exactly', async () => {
   await page.goto(t.url + '/#/templates');
   await page.waitForSelector('.card');
-  const [dl] = await Promise.all([page.waitForEvent('download'), page.getByRole('button', { name: 'Export .njs' }).first().click()]);
+  await page.getByRole('button', { name: 'Download as…' }).first().click();
+  const [dl] = await Promise.all([page.waitForEvent('download'), page.getByRole('menuitem', { name: '.njs design file', exact: true }).click()]);
   const file = await dl.path();
   const original = JSON.parse(readFileSync(file, 'utf8'));
   eq(original.format, 'vierapparatus-dce'); eq(original.version, '1.0.0');

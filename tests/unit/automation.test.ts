@@ -48,7 +48,7 @@ describe('trigger semantics ("when a record matches")', () => {
 describe('GraphQL for Buffer', () => {
   it('is built with escaped literals — user text cannot break out of the string', () => {
     const evil = 'He said "hi" }) { x } # \ and\nnewline';
-    const q = buildCreatePost({ text: evil, channelId: 'abc"def', mode: 'scheduled', dueAt: '2026-11-07T10:00:00.000Z', imageUrl: 'https://x.test/a.png?a="1"' });
+    const q = buildCreatePost({ text: evil, channelId: 'abc"def', mode: 'scheduled', dueAt: '2026-11-07T10:00:00.000Z', imageUrls: ['https://x.test/a.png?a="1"'] });
     expect(q).toContain('mode: customScheduled');
     expect(q).toContain('dueAt: "2026-11-07T10:00:00.000Z"');
     expect(q).toContain(JSON.stringify(evil));

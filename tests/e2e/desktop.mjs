@@ -4,7 +4,7 @@ import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawn } from 'node:child_process';
 import { chromium } from 'playwright-core';
-import { check, eq, ok, report } from './helpers.mjs';
+import { check, dump, eq, ok, report } from './helpers.mjs';
 
 const exe = process.env.DCE_EXE ?? join(process.env.DCE_OUT ?? join(homedir(), 'DCE-release'), 'win-unpacked', 'Dynamic Canvas Engine.exe');
 if (!existsSync(exe)) { console.error('Build first: npm run dist:win  (looked for ' + exe + ')'); process.exit(2); }
@@ -84,6 +84,144 @@ await check('rendering works in the packaged app (workers, OffscreenCanvas, Inde
   await page.getByRole('button', { name: /Download/ }).waitFor({ timeout: 60000 });
   const chips = await page.locator('.chip.ok').allInnerTexts();
   ok(chips.some((c) => /4 ok/.test(c)) && chips.includes('completed'), chips.join());
+});
+
+await check('the packaged app has the new automation step (where the files go) and the template download menu', async () => {
+  const base = page.url().replace(/#.*$/, '');
+  const tpl = (await dump(page, 'templates'))[0];
+  await page.evaluate((row) => new Promise((resolve, reject) => {
+    const req = indexedDB.open('dce');
+    req.onerror = () => reject(req.error);
+    req.onsuccess = () => {
+      const db = req.result;
+      const tx = db.transaction('automations', 'readwrite');
+      tx.objectStore('automations').put(row);
+      tx.oncomplete = () => { db.close(); resolve(); };
+      tx.onerror = () => reject(tx.error);
+    };
+  }), {
+    id: 'auto-desktop', name: 'Desktop render', enabled: false, created_at: 1, updated_at: 1,
+    trigger: { kind: 'record', table: 'content', filter: { join: 'and', conditions: [] } },
+    steps: [{ kind: 'render', table: 'content', templateId: tpl.id, format: 'png', dest: { kind: 'zip', connId: '', folder: '', folderId: '', folderName: '', table: '', field: 'uploaded_link', keepZip: false } }],
+    fired: {},
+  });
+  await page.goto(base + '#/automations');
+  await page.reload();
+  await page.getByRole('listitem').filter({ hasText: 'Desktop render' }).click();
+  await page.getByText('Where the files go', { exact: true }).waitFor();
+  ok(await page.getByRole('radio', { name: 'Upload to Cloudflare R2' }).count() === 1, 'the step offers the Cloudflare R2 upload');
+  ok(await page.getByRole('radio', { name: 'Upload to a Google Drive folder' }).count() === 1, 'the step offers the Google Drive upload');
+  await page.goto(base + '#/templates');
+  await page.waitForSelector('.card');
+  await page.locator('.card').first().getByRole('button', { name: 'Download as…' }).click();
+  eq(await page.getByRole('menu').getByRole('menuitem').allTextContents(), ['.njs design file', 'PNG image', 'JPEG image', 'PDF document', 'SVG drawing', 'HTML page'], 'the download menu of a template');
+  await page.keyboard.press('Escape');
+});
+
+await check('the packaged app: a Buffer post can take its image by link, and the record details open wide enough to edit', async () => {
+  const base = page.url().replace(/#.*$/, '');
+  await page.evaluate(() => new Promise((resolve, reject) => {
+    const req = indexedDB.open('dce');
+    req.onerror = () => reject(req.error);
+    req.onsuccess = () => {
+      const db = req.result;
+      const tx = db.transaction('automations', 'readwrite');
+      tx.objectStore('automations').put({
+        id: 'auto-desktop-buffer', name: 'Buffer image check', enabled: false, created_at: 2, updated_at: 2,
+        trigger: { kind: 'record', table: 'content', filter: { join: 'and', conditions: [] } },
+        steps: [{ kind: 'buffer_post', connectionId: '', channel: '', text: '{{title}}', imageField: '', timing: { mode: 'queue', delayAmount: 30, delayUnit: 'minutes', pastPolicy: 'skip' } }],
+        fired: {},
+      });
+      tx.oncomplete = () => { db.close(); resolve(); };
+      tx.onerror = () => reject(tx.error);
+    };
+  }));
+  await page.goto(base + '#/automations');
+  await page.reload();
+  await page.getByRole('listitem').filter({ hasText: 'Buffer image check' }).click();
+  await page.getByRole('radio', { name: 'Send by link' }).waitFor();
+  await page.getByRole('radio', { name: 'Send by link' }).click();
+  await page.waitForSelector('[aria-label="Link field"]');
+  await page.goto(base + '#/content');
+  await page.waitForSelector('.vgrid-row');
+  await page.locator('.vgrid-row').first().getByRole('button', { name: 'Open record details' }).click();
+  const box = await page.locator('.drawer').boundingBox();
+  ok(box && box.width >= 430 && box.width <= 660, `the record details are ${Math.round(box?.width ?? 0)} px wide`);
+  await page.getByRole('button', { name: 'Close details' }).click();
+});
+
+await check('the packaged app: the table can be copied and saved as Excel, its columns move, and a weekly schedule can run one row at a time', async () => {
+  const base = page.url().replace(/#.*$/, '');
+  await page.goto(base + '#/content');
+  await page.waitForSelector('.vgrid-head');
+  await page.getByRole('button', { name: 'Copy table', exact: true }).waitFor();
+  await page.getByRole('button', { name: /^Export/ }).click();
+  eq(await page.getByRole('button', { name: 'Excel file (.xlsx)', exact: true }).count(), 1, 'the Excel option is in the export menu');
+  await page.keyboard.press('Escape');
+  await page.locator('.vhead', { hasText: 'Status' }).first().click({ button: 'right' });
+  eq(await page.getByRole('menuitem', { name: 'Move right', exact: true }).count(), 1, 'the column menu can move a column');
+  await page.keyboard.press('Escape');
+});
+
+await check('the packaged app: an automation step is “Update a record”, with the choice of the record', async () => {
+  const base = page.url().replace(/#.*$/, '');
+  const tpl = (await dump(page, 'templates'))[0];
+  await page.evaluate((row) => new Promise((resolve, reject) => {
+    const req = indexedDB.open('dce');
+    req.onerror = () => reject(req.error);
+    req.onsuccess = () => {
+      const db = req.result;
+      const tx = db.transaction('automations', 'readwrite');
+      tx.objectStore('automations').put(row);
+      tx.oncomplete = () => { db.close(); resolve(); };
+      tx.onerror = () => reject(tx.error);
+    };
+  }), {
+    id: 'auto-update-desktop', name: 'Update desktop', enabled: false, created_at: 3, updated_at: 3,
+    trigger: { kind: 'record', table: 'content', filter: { join: 'and', conditions: [] }, on: { kind: 'matches' } },
+    steps: [{ kind: 'set_field', table: 'content', field: 'status', value: 'Published', match: { field: 'title', value: 'Magnetic Stirrer' } }],
+    fired: {},
+  });
+  await page.goto(base + '#/automations');
+  await page.reload();
+  await page.getByRole('listitem').filter({ hasText: 'Update desktop' }).click();
+  await page.getByRole('radio', { name: 'The record where a field has a value' }).waitFor();
+  eq(await page.getByRole('radio', { name: 'The record where a field has a value' }).isChecked(), true, 'the record is found by a value');
+  eq(await page.getByLabel('Record value', { exact: true }).inputValue(), 'Magnetic Stirrer', 'the value that finds the record');
+});
+
+await check('the packaged app: a batch to R2 can delete its files after a set time, and “Delete a record” can delete the record with its R2 file', async () => {
+  const base = page.url().replace(/#.*$/, '');
+  await page.goto(base + '#/batch');
+  await page.waitForSelector('text=Where the files go');
+  await page.getByRole('radio', { name: 'Upload to Cloudflare R2' }).check();
+  await page.getByRole('radio', { name: /Delete them after/ }).waitFor();
+  eq(await page.getByRole('radio', { name: /Delete them at a date and time/ }).count(), 1, 'the date and time choice is there');
+  await page.getByRole('radio', { name: 'Download ZIP only' }).check();
+  await page.goto(base + '#/automations');
+  await page.reload();
+  const tpl = (await dump(page, 'templates'))[0];
+  await page.evaluate((row) => new Promise((resolve, reject) => {
+    const req = indexedDB.open('dce');
+    req.onerror = () => reject(req.error);
+    req.onsuccess = () => {
+      const db = req.result;
+      const tx = db.transaction('automations', 'readwrite');
+      tx.objectStore('automations').put(row);
+      tx.oncomplete = () => { db.close(); resolve(); };
+      tx.onerror = () => reject(tx.error);
+    };
+  }), {
+    id: 'auto-delete-desktop', name: 'Delete desktop', enabled: false, created_at: 4, updated_at: 4,
+    trigger: { kind: 'record', table: 'content', filter: { join: 'and', conditions: [] }, on: { kind: 'matches' } },
+    steps: [{ kind: 'delete_record', table: 'content', fileField: 'title' }],
+    fired: {},
+  });
+  await page.reload();
+  await page.getByRole('listitem').filter({ hasText: 'Delete desktop' }).click();
+  await page.getByRole('radio', { name: 'The record that started this automation' }).waitFor();
+  eq(await page.getByRole('combobox', { name: 'File field' }).inputValue(), 'title', 'the file field is chosen');
+  ok(tpl, 'a template exists');
 });
 
 await check('data persists across a restart of the app', async () => {

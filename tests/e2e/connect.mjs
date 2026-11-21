@@ -38,6 +38,10 @@ const RELAY = `http://127.0.0.1:${relayPort}`;
 
 const t = await launch({ viewport: { width: 1600, height: 950 } });
 const { page, errors } = t;
+// the image hosts of this test: a picture, a missing picture (404), and a Google Drive file served as a picture
+await page.route(/^https:\/\/(img\.example\.test|drive\.usercontent\.google\.com)\//, (route) => (route.request().url().includes('/missing')
+  ? route.fulfill({ status: 404, body: 'not found' })
+  : route.fulfill({ status: 200, contentType: 'image/png', headers: { 'access-control-allow-origin': '*' }, body: Buffer.from('89504e470d0a1a0a', 'hex') })));
 const text = () => page.evaluate(() => document.body.innerText);
 const posts = () => calls.filter((c) => c.q.includes('createPost'));
 
@@ -151,7 +155,7 @@ await check('tables: rows are edited like a spreadsheet; every Airtable-style fi
   await page.getByLabel('Name').last().fill('Acme Lab');
   await page.keyboard.press('Enter');
   await page.locator('.vgrid-row').first().locator('[role=gridcell]').nth(1).dblclick();
-  await page.getByLabel('Price').last().fill('1200');
+  await page.getByLabel('Price', { exact: true }).last().fill('1200');
   await page.keyboard.press('Enter');
   await waitIdle(page, 300);
   const row = (await dump(page, 'rows'))[0];
@@ -217,7 +221,7 @@ await check('link fields are two-sided; a synced field mirrors in BOTH direction
   await page.goto(t.url + '/#/table/' + a.tableId);
   await page.waitForSelector('.vgrid-row');
   await page.locator('.vgrid-row').first().locator('[role=gridcell]').nth(1).dblclick();
-  await page.getByLabel('Price').last().fill('1500');
+  await page.getByLabel('Price', { exact: true }).last().fill('1500');
   await page.keyboard.press('Enter');
   await waitIdle(page, 400);
   eq(await read(), 1500);
@@ -229,7 +233,7 @@ await check('link fields are two-sided; a synced field mirrors in BOTH direction
   const heads = await page.locator('.vhead[role=columnheader]').allInnerTexts();
   const si = heads.findIndex((h) => h.startsWith('Supplier price'));
   await page.locator('.vgrid-row').first().locator('[role=gridcell]').nth(si).dblclick();
-  await page.getByLabel('Supplier price').last().fill('1700');
+  await page.getByLabel('Supplier price', { exact: true }).last().fill('1700');
   await page.keyboard.press('Enter');
   await waitIdle(page, 500);
   eq((await dump(page, 'rows')).find((r) => r.data.name === 'Acme Lab').data.price, 1700);
@@ -278,6 +282,8 @@ await check('automation: “when Status = Ready to post → Buffer post 30 minut
   const opts = await page.getByLabel('Channel', { exact: true }).locator('option').allTextContents();
   ok(opts.some((o) => /INSTAGRAM/.test(o)) && !(await text()).includes(CH_IG), 'channels come from the account, ids stay hidden');
   await page.getByLabel('Channel', { exact: true }).selectOption('BUFFER_CHANNEL_ID_INSTAGRAM');
+  ok(await page.getByLabel('Instagram post type').count() === 1, 'an Instagram channel asks for the post type');
+  ok((await page.getByLabel('Post id field').locator('option').allTextContents()).some((o) => /Create “Buffer post id”/.test(o)), 'the post id can go into a new field');
   await page.getByLabel('Post text').fill('New: {{title}} — {{description}}');
   await page.getByLabel('Delay amount').fill('30');
   const auto = (await dump(page, 'automations'))[0];
@@ -306,6 +312,7 @@ await check('automation fires when a record starts matching: exact payload, sche
   ok(p.q.includes(`channelId: "${CH_IG}"`), 'channel id decrypted at send time');
   ok(p.q.includes('Laboratory Centrifuge') && p.q.includes('Benchtop centrifuge'), 'fields merged into the text');
   ok(p.q.includes('mode: customScheduled'), 'scheduled mode');
+  ok(p.q.includes('metadata: { instagram: { type: post, shouldShareToFeed: true } }'), 'the Instagram post type is sent, with shouldShareToFeed');
   const due = Date.parse(/dueAt: "([^"]+)"/.exec(p.q)[1]);
   ok(Math.abs(due - (before + 30 * 60_000)) < 3 * 60_000, `dueAt ≈ now + 30 min (off by ${Math.round((due - before - 1.8e6) / 1000)} s)`);
   await waitIdle(page, 1500);
@@ -318,6 +325,107 @@ await check('automation fires when a record starts matching: exact payload, sche
   eq(posts().length, 1);                                           // never duplicated
 });
 
+await check('a Buffer post sends several images from a link field: a carousel of links, one asset per link, in order', async () => {
+  // a text field that holds the links (public image files, separated by commas), and the links on one record
+  const LINKS = ['https://img.example.test/cards/1.png', 'https://img.example.test/cards/2.png'];
+  await page.evaluate(([links]) => new Promise((resolve, reject) => {
+    const req = indexedDB.open('dce');
+    req.onerror = () => reject(req.error);
+    req.onsuccess = () => {
+      const db = req.result;
+      const tx = db.transaction(['fields', 'records'], 'readwrite');
+      tx.objectStore('fields').put({ id: 'fImageLinks', key: 'image_links', label: 'Image links', type: 'longtext', order: 90 });
+      const recs = tx.objectStore('records');
+      recs.getAll().onsuccess = (e) => {
+        const rec = e.target.result.find((r) => r.title === 'Analytical Balance');
+        recs.put({ ...rec, data: { ...rec.data, image_links: links.join(', ') } });
+      };
+      tx.oncomplete = () => { db.close(); resolve(); };
+      tx.onerror = () => reject(tx.error);
+    };
+  }), [LINKS]);
+  await page.goto(t.url + '/#/automations');
+  await page.reload();
+  await page.getByRole('listitem').filter({ hasText: 'Instagram when ready' }).click();
+  await page.getByLabel('Post text').waitFor();
+  await page.getByRole('radio', { name: /Send by link/ }).click();
+  await waitIdle(page, 300); // the choice is saved, then shown: check() would look before that
+  await page.getByLabel('Link field', { exact: true }).selectOption('image_links');
+  await waitIdle(page, 300);
+  const before = posts().length;
+  await setStatus('Analytical Balance', 'Ready to post');
+  const t0 = Date.now();
+  while (posts().length === before && Date.now() - t0 < 15000) await new Promise((r) => setTimeout(r, 300));
+  eq(posts().length, before + 1, 'one post was sent for the record');
+  const urls = [...posts().at(-1).q.matchAll(/url: "([^"]+)"/g)].map((m) => m[1]);
+  eq(urls, LINKS, 'both images, in the order of the field');
+});
+
+await check('a Google Drive folder is refused before anything is sent; a Drive file link is sent as the file’s direct address', async () => {
+  const setLink = (value) => page.evaluate((v) => new Promise((resolve, reject) => {
+    const req = indexedDB.open('dce');
+    req.onerror = () => reject(req.error);
+    req.onsuccess = () => {
+      const db = req.result;
+      const tx = db.transaction('records', 'readwrite');
+      const recs = tx.objectStore('records');
+      recs.getAll().onsuccess = (e) => {
+        const rec = e.target.result.find((r) => r.title === 'Analytical Balance');
+        recs.put({ ...rec, data: { ...rec.data, image_links: v } });
+      };
+      tx.oncomplete = () => { db.close(); resolve(); };
+      tx.onerror = () => reject(tx.error);
+    };
+  }), value);
+  // the app keeps records in memory: reload, so the change is saved on top of the seeded link, not a stale copy
+  const matchWith = async (value) => {
+    await setLink(value);
+    await page.reload();
+    await page.waitForSelector('text=Content Plan');
+    // not matching for a moment first: the automation then forgets the record, so it starts again when the record matches
+    await setStatus('Analytical Balance', 'Draft');
+    await waitIdle(page, 4000);
+    await page.reload();
+    await page.waitForSelector('text=Content Plan');
+    await setStatus('Analytical Balance', 'Ready to post');
+  };
+  // 1. a Drive folder is not one image file: the run fails with the reason, and nothing is sent
+  const before = posts().length;
+  await matchWith('https://drive.google.com/drive/folders/FOLDER0001ABCDE');
+  let run;
+  const t0 = Date.now();
+  while (Date.now() - t0 < 15000) {
+    run = (await dump(page, 'autoRuns')).find((r) => r.recordTitle === 'Analytical Balance' && r.status === 'failed' && /Google Drive folder or page/.test(r.detail));
+    if (run) break;
+    await new Promise((r) => setTimeout(r, 300));
+  }
+  ok(run, 'the run failed with the reason');
+  eq(posts().length, before, 'nothing was sent to Buffer');
+  // 2. a Drive file link is sent to Buffer as Google’s direct-download address for that file
+  const posted = posts().length;
+  await matchWith('https://drive.google.com/file/d/CARD1ABCXYZ9/view?usp=drive_link');
+  const t1 = Date.now();
+  while (posts().length === posted && Date.now() - t1 < 15000) await new Promise((r) => setTimeout(r, 300));
+  eq(posts().length, posted + 1, 'one post was sent for the record');
+  const urls = [...posts().at(-1).q.matchAll(/url: "([^"]+)"/g)].map((m) => m[1]);
+  eq(urls, ['https://drive.usercontent.google.com/download?id=CARD1ABCXYZ9&export=download'], 'the file is sent as its direct address');
+  // an image that is not in the bucket: the post is refused before anything is sent to Buffer
+  const sentBefore = posts().length;
+  await matchWith('https://img.example.test/missing/card.png');
+  let missing;
+  const t2 = Date.now();
+  while (Date.now() - t2 < 15000) {
+    missing = (await dump(page, 'autoRuns')).find((r) => r.recordTitle === 'Analytical Balance' && r.status === 'failed' && /HTTP 404/.test(r.detail));
+    if (missing) break;
+    await new Promise((r) => setTimeout(r, 300));
+  }
+  ok(missing, 'the run failed with the reason: the image is not in the bucket');
+  eq(posts().length, sentBefore, 'nothing was sent to Buffer for the missing image');
+  // not matching any more: the record is not retried, and the next checks start from the same state as before
+  await setStatus('Analytical Balance', 'Posted');
+  await waitIdle(page, 1500);
+});
+
 await check('failures are logged with Buffer’s message and retried later, not hammered', async () => {
   // make the text start with FAIL first (the mock rejects those), THEN let one record start matching
   await page.goto(t.url + '/#/automations');
@@ -325,8 +433,8 @@ await check('failures are logged with Buffer’s message and retried later, not 
   await page.waitForTimeout(500);
   await setStatus('Micropipette', 'Ready to post');
   const t0 = Date.now();
-  while (!(await dump(page, 'autoRuns')).some((r) => r.status === 'failed') && Date.now() - t0 < 15000) await new Promise((r) => setTimeout(r, 400));
-  const failed = (await dump(page, 'autoRuns')).filter((r) => r.status === 'failed');
+  while (!(await dump(page, 'autoRuns')).some((r) => r.status === 'failed' && /Channel is disconnected/.test(r.detail)) && Date.now() - t0 < 15000) await new Promise((r) => setTimeout(r, 400));
+  const failed = (await dump(page, 'autoRuns')).filter((r) => r.status === 'failed' && /Channel is disconnected/.test(r.detail));
   ok(failed.length >= 1 && /Channel is disconnected/.test(failed[0].detail) && failed[0].steps.some((s) => s.status === 'failed'), failed[0]?.detail);
   const n = posts().length;
   await new Promise((r) => setTimeout(r, 3500));
@@ -375,7 +483,10 @@ await check('everything persists across a reload and the vault key still decrypt
   ok((await dump(page, 'userTables')).length === 1 && (await dump(page, 'automations')).length === 2, 'tables and automations stored');
 });
 
-await check('no console errors during the whole session', async () => { ok(errors.length === 0, errors.slice(0, 3).join(' | ')); });
+await check('no console errors during the whole session (the 404 of the missing-image fixture is expected)', async () => {
+  const real = errors.filter((e) => !/Failed to load resource: the server responded with a status of 404/.test(e));
+  ok(real.length === 0, real.slice(0, 3).join(' | '));
+});
 const failed = report();
 await t.close(); relay.kill(); mock.close();
 process.exit(failed ? 1 : 0);

@@ -127,6 +127,8 @@ describe('spreadsheet copy / paste', () => {
   it('copies readable names for images; pastes by name; coerces types; skips what does not fit', () => {
     const withImg = rec({ title: 'Pic', image_asset: 'a1', data: { price: 5 } });
     expect(copyRows([withImg], cols, lk)).toEqual([['Pic', 'Draft', '5', 'pic.png']]);
+    // a formula cell copies what the grid gives for it (its result), every other cell keeps its text
+    expect(copyRows([withImg], cols, lk, (_r, f) => (f.key === 'price' ? '42' : undefined))).toEqual([['Pic', 'Draft', '42', 'pic.png']]);
     const plan = planPaste({ grid: [['Uno', 'Approved', '1,200', 'pic.png'], ['Dos', 'Bogus', 'abc', '']], startRow: 0, startCol: 0, view, fields: cols, lookups: lk });
     expect(plan.updated.map((r) => [r.title, r.status, r.data.price, r.image_asset])).toEqual([['Uno', 'Approved', 1200, 'a1'], ['Dos', 'Draft', undefined, '']]);
     expect(plan.updated[0].slug).toBe('uno'); // slug follows the title while it was auto-generated
