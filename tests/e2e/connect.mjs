@@ -64,7 +64,7 @@ await check('connections: add an account — the API key is encrypted at rest an
   await page.goto(t.url + '/#/settings');
   await page.waitForSelector('text=Connections');
   await page.getByRole('button', { name: /Add account/ }).click();
-  await page.getByRole('dialog').getByLabel('Account name').fill('satrio666sto@gmail.com');
+  await page.getByRole('dialog').getByLabel('Account name').fill('test.account@example.test');
   await page.getByRole('dialog').getByLabel('API key').fill(KEY1);
   await page.getByRole('dialog').getByRole('button', { name: 'Add account' }).click();
   await page.waitForSelector('text=/API key encrypted/');
@@ -108,7 +108,7 @@ await check('connections: channel ids are encrypted + hidden too; two accounts a
   const second = (await dump(page, 'connections')).find((c) => c.name === 'second@example.com');
   eq((await dump(page, 'settings')).find((s) => s.key === 'connections.active.buffer').value, second.id);
   ok(await page.getByTestId('secret-BUFFER_CHANNEL_ID_INSTAGRAM').count() === 0, 'the other account has its own properties');
-  await picker.selectOption({ label: 'satrio666sto@gmail.com' });
+  await picker.selectOption({ label: 'test.account@example.test' });
   await page.waitForSelector('[data-testid="secret-BUFFER_CHANNEL_ID_INSTAGRAM"]');
 });
 
@@ -117,7 +117,7 @@ await check('connections: relay check and “test connection” list the real ch
   await page.getByRole('button', { name: 'Check relay' }).click();
   await page.waitForSelector('text=/Relay is running/');
   await page.getByRole('button', { name: /Test connection/ }).click();
-  await page.waitForSelector('text=/Channels of satrio666sto@gmail.com/');
+  await page.waitForSelector('text=/Channels of test.account@example.test/');
   ok((await text()).includes('instagram') && (await text()).includes('linkedin'), 'channels listed');
   ok(!(await text()).includes(CH_IG), 'their ids are not displayed');
   ok(calls.some((c) => c.auth === `Bearer ${KEY1}`), 'the account key reached Buffer (via the relay)');
@@ -125,7 +125,7 @@ await check('connections: relay check and “test connection” list the real ch
   // the Instagram channel was saved by hand before (same id): it is recognised and NOT added a second time
   await page.waitForSelector('text=/1 channel added/');
   await page.waitForSelector('[data-testid="secret-BUFFER_CHANNEL_ID_LINKEDIN_VIER_APPARATUS"]');
-  const acct = (await dump(page, 'connections')).find((c) => c.name === 'satrio666sto@gmail.com');
+  const acct = (await dump(page, 'connections')).find((c) => c.name === 'test.account@example.test');
   eq(acct.props.filter((p) => /INSTAGRAM/.test(p.key)).length, 1, 'no duplicate Instagram channel');
 });
 
