@@ -4,8 +4,8 @@ import {
   AlignCenterHorizontal, AlignCenterVertical, AlignEndHorizontal, AlignEndVertical, AlignHorizontalSpaceBetween, AlignLeft, AlignRight,
   AlignStartHorizontal, AlignStartVertical, AlignVerticalSpaceBetween, AlignCenter, Bold, ImagePlus, Italic, Link2Off, Plus, Strikethrough, Underline, X,
 } from 'lucide-react';
-import { allFields } from '../db/fields';
-import { recordsStore } from '../db/repo';
+import { dataTableOf } from '../db/repo';
+import { allTables, tableName, useTableData } from '../db/tables';
 import { db } from '../db/schema';
 import { validateExpr } from '../engine/expr';
 import { getPlugin } from '../engine/plugins';
@@ -21,14 +21,15 @@ import type { EditorController } from './controller';
 
 type Tab = 'design' | 'data' | 'fit' | 'template';
 
+/** What a bound element can use: the fields of the template's data table (`content.<key>`), then the template's own variables. */
 function useFieldOptions(ctrl: EditorController) {
-  const custom = useStore(recordsStore, (s) => s.fields);
   const doc = useStore(ctrl.store, (s) => s.doc);
+  const { fields } = useTableData(dataTableOf(doc));
   return useMemo(() => {
-    const content = allFields(custom).map((f) => ({ key: `content.${f.key}`, label: f.label, type: f.type }));
+    const content = fields.map((f) => ({ key: `content.${f.key}`, label: f.label, type: f.type }));
     const vars = doc.placeholders.filter((p) => p.key.startsWith('template.')).map((p) => ({ key: p.key, label: p.label || p.key, type: p.type as string }));
     return [...content, ...vars];
-  }, [custom, doc.placeholders]);
+  }, [fields, doc.placeholders]);
 }
 
 function FieldSelect(props: { value: string; onChange: (key: string) => void; options: { key: string; label: string; type: string }[]; placeholder?: string; label: string }) {
@@ -96,6 +97,7 @@ function DesignTab({ ctrl, n, onGoto }: { ctrl: EditorController; n: DceNode; on
   const fonts = useLiveQuery(() => db.fonts.toArray(), [], []);
   const families = useMemo(() => ['Jost', ...new Set((fonts ?? []).map((f) => f.family)), ...FONTS_GENERIC], [fonts]);
   const [picker, setPicker] = useState(false);
+  const fieldOpts = useFieldOptions(ctrl);
   const set = (fn: (x: DceNode) => void, coalesce?: string) => ctrl.updateNode(n.id, fn, { coalesce: coalesce ? `${n.id}:${coalesce}` : undefined });
   const st = n.style;
   const palette = doc.constraints.palette ?? [];
@@ -205,7 +207,18 @@ function DesignTab({ ctrl, n, onGoto }: { ctrl: EditorController; n: DceNode; on
           </div>
           <Num label="Corner radius" value={st.cornerRadius ?? 0} min={0} max={4000} onChange={(v) => set((x) => { x.style.cornerRadius = v; }, 'cr')} />
           <ColorField label="Border" value={st.stroke} allowNone palette={palette} onChange={(v) => set((x) => { x.style.stroke = v; if (v !== 'none' && !(x.style.strokeWidth ?? 0)) x.style.strokeWidth = 2; }, 'stroke')} />
-          {picker && <AssetPicker current={n.src?.assetId} onPick={(id) => set((x) => { x.src = { assetId: id }; })} onClose={() => setPicker(false)} />}
+          {n.binding?.image && (
+            <div className="small muted">Taken from the field <b>{fieldOpts.find((o) => o.key === n.binding?.image?.key)?.label ?? n.binding.image.key}</b> of each record{n.src?.assetId ? ' (the static image is the fallback)' : ''}.</div>
+          )}
+          {picker && (
+            <AssetPicker
+              current={n.src?.assetId}
+              fields={fieldOpts.filter((o) => o.type === 'image' || o.type === 'text' || o.type === 'url')}
+              currentField={n.binding?.image?.key}
+              onPickField={(key) => set((x) => { x.binding = { ...(x.binding ?? {}), image: { key, fallback: x.binding?.image?.fallback } }; })}
+              onPick={(id) => set((x) => { x.src = { assetId: id }; if (x.binding?.image) { delete x.binding.image; if (!Object.keys(x.binding).length) delete x.binding; } })}
+              onClose={() => setPicker(false)} />
+          )}
         </Section>
       )}
       {n.type === 'plugin' && <PluginSection ctrl={ctrl} n={n} />}
@@ -243,6 +256,9 @@ function singleKey(tpl: string | undefined): string {
 
 function DataTab({ ctrl, n }: { ctrl: EditorController; n: DceNode }) {
   const opts = useFieldOptions(ctrl);
+  const doc = useStore(ctrl.store, (s) => s.doc);
+  const dataTable = dataTableOf(doc);
+  const { records: dataRecords } = useTableData(dataTable);
   const set = (fn: (x: DceNode) => void, co?: string) => ctrl.updateNode(n.id, fn, { coalesce: co ? `${n.id}:${co}` : undefined });
   const b = n.binding ?? {};
   const expr = b.visible?.expr ?? '';
@@ -254,6 +270,19 @@ function DataTab({ ctrl, n }: { ctrl: EditorController; n: DceNode }) {
   const unbind = (k: 'text' | 'image' | 'fill' | 'visible') => set((x) => { if (x.binding) { delete x.binding[k]; if (!Object.keys(x.binding).length) delete x.binding; } });
   return (
     <>
+      <Section title="Records">
+        <label className="fld"><span>1 · Table the records come from</span>
+          <select aria-label="Data table" value={dataTable} onChange={(e) => ctrl.setDataTable(e.target.value)}>
+            {allTables().map((t) => <option key={t.id} value={t.id}>{t.name}</option>)}
+          </select>
+        </label>
+        <div className="muted small">{dataRecords.length.toLocaleString()} record{dataRecords.length === 1 ? '' : 's'}. Choose the table first; the fields below are the fields of that table. Batch Runner renders this template for the records of this table.</div>
+      </Section>
+      {(() => {
+        const used = [singleKey(b.text?.template), b.image?.key ?? ''].filter((k) => k && !k.startsWith('template.'));
+        const missing = used.filter((k) => !opts.some((o) => o.key === k));
+        return missing.length ? <div className="sect"><div className="callout warn">{missing.length} field(s) of this element are not in “{tableName(dataTable)}”: {missing.join(', ')}. Choose the field again from the list.</div></div> : null;
+      })()}
       <div className="sect"><div className="callout">Bound elements show a <span className="bind-dot" /> and a dashed outline in the design view. Turn on <b>Data preview</b> in the toolbar to see real values.</div></div>
       {n.type === 'text' && (
         <Section title="Text from data">
@@ -283,6 +312,16 @@ function DataTab({ ctrl, n }: { ctrl: EditorController; n: DceNode }) {
                 {b.image.fallback && <button className="btn sm ghost" onClick={() => set((x) => { if (x.binding?.image) delete x.binding.image.fallback; })}>Clear</button>}
               </div>
               {fallbackPicker && <AssetPicker current={b.image.fallback} onPick={(id) => set((x) => { if (x.binding?.image) x.binding.image.fallback = id; })} onClose={() => setFallbackPicker(false)} />}
+            </div>
+          )}
+          {b.image && (
+            <div className="col" style={{ gap: 4 }}>
+              <label className="chk">
+                <input type="checkbox" aria-label="Automatically delete image background" checked={!!b.image.cutout}
+                  onChange={(e) => { const on = e.target.checked; set((x) => { if (x.binding?.image) { if (on) x.binding.image.cutout = true; else delete x.binding.image.cutout; } }); }} />
+                {' '}Automatically delete image background
+              </label>
+              <div className="small muted">Removes the background that touches the image's border (white or plain backgrounds) when the image is drawn. The file itself and the record stay as they are.</div>
             </div>
           )}
           {b.image && <button className="btn sm" onClick={() => unbind('image')}><Link2Off size={14} /> Remove image binding</button>}

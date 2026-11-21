@@ -94,6 +94,11 @@ const parseDay = (s: string): Date | undefined => {
   return m ? new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3])) : undefined;
 };
 
+/** The rows one occurrence of a schedule runs: all of them, or the first `perTime` (in table order). */
+export function takeForOccurrence<T>(rows: T[], perTime: number | undefined): T[] {
+  return perTime && perTime > 0 ? rows.slice(0, perTime) : rows;
+}
+
 /** The most recent moment at or before `now` when the schedule fires (undefined when there is none). */
 export function latestDue(when: WeeklyWhen, now: number): number | undefined {
   if (when.mode === 'once') {

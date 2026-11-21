@@ -7,7 +7,10 @@ import { boot } from './boot';
 import { db } from './db/schema';
 import { recordsStore } from './db/repo';
 import { ConfirmHost, Dialog, go, IconBtn, Spinner, ToastHost, useHash } from './ui/kit';
-import { createTable, useTableList } from './db/tables';
+import { createTable, fieldsOf, useTableList } from './db/tables';
+import { tablesStore } from './db/stores';
+import './db/carousel';
+import { NewTableDialog } from './pages/content/NewTableDialog';
 import { startAutomationLoop } from './automation/engine';
 import { getState } from './pipeline/run';
 import { startPipelineLoop } from './pipeline/run';
@@ -138,9 +141,9 @@ function Shell({ route }: { route: { page: string; arg?: string } }) {
   const [collapsed, setCollapsed] = useState(() => { try { return localStorage.getItem('dce.sidebar') === '1'; } catch { return false; } });
   const [help, setHelp] = useState(false);
   const tables = useTableList();
+  const contentName = useStore(tablesStore, (x) => x.contentName);
   const alert = useLiveQuery(async () => !!(await getState()).alert, [], false);
   const [newTable, setNewTable] = useState(false);
-  const [tname, setTname] = useState('');
   const toggle = () => setCollapsed((c) => { try { localStorage.setItem('dce.sidebar', c ? '0' : '1'); } catch { /* storage unavailable */ } return !c; });
   return (
     <div className="app">
@@ -160,8 +163,8 @@ function Shell({ route }: { route: { page: string; arg?: string } }) {
             const Icon = n.icon;
             const active = route.page === n.id || (n.id === 'workspace' && route.page === 'workspace');
             return (
-              <a key={n.id} href={n.path} className={`nav ${active ? 'active' : ''}`} aria-current={active ? 'page' : undefined} title={collapsed ? n.label : undefined}>
-                <Icon size={17} /><span>{n.label}</span>{n.id === 'pipeline' && alert && <span className="dot-alert" role="img" aria-label="Pipeline needs attention" />}
+              <a key={n.id} href={n.path} className={`nav ${active ? 'active' : ''}`} aria-current={active ? 'page' : undefined} title={collapsed ? (n.id === 'content' ? contentName : n.label) : undefined}>
+                <Icon size={17} /><span>{n.id === 'content' ? contentName : n.label}</span>{n.id === 'pipeline' && alert && <span className="dot-alert" role="img" aria-label="Pipeline needs attention" />}
               </a>
             );
           })}
@@ -170,7 +173,8 @@ function Shell({ route }: { route: { page: string; arg?: string } }) {
             const active = route.page === 'table' && route.arg?.split('/')[0] === t.id;
             return (
               <a key={t.id} href={`#/table/${t.id}`} className={`nav ${active ? 'active' : ''}`} aria-current={active ? 'page' : undefined} title={collapsed ? t.name : undefined}>
-                <Table2 size={17} /><span>{t.name}</span>
+                {t.carousel ? <Layers3 size={17} /> : <Table2 size={17} />}<span>{t.name}</span>
+                {fieldsOf(t.id).some((f) => f.sync) && <span className="syncmark" aria-label="Has synced fields" title="Has synced fields (⚡ linked to another table)" style={{ color: '#b7791f', marginLeft: 'auto' }}>⚡</span>}
               </a>
             );
           })}
@@ -198,15 +202,7 @@ function Shell({ route }: { route: { page: string; arg?: string } }) {
         </main>
       </div>
       {help && <HelpDialog onClose={() => setHelp(false)} />}
-      {newTable && (
-        <Dialog title="New table" onClose={() => setNewTable(false)} foot={<>
-          <button className="btn" onClick={() => setNewTable(false)}>Cancel</button>
-          <button className="btn primary" disabled={!tname.trim()} onClick={async () => { const t = await createTable(tname); setNewTable(false); setTname(''); notify('success', `Table “${t.name}” created.`); go(`#/table/${t.id}`); }}>Create table</button>
-        </>}>
-          <label className="fld"><span>Table name</span><input value={tname} onChange={(e) => setTname(e.target.value)} placeholder="e.g. Products, Suppliers, Campaigns" autoFocus onKeyDown={async (e) => { if (e.key === 'Enter' && tname.trim()) { const t = await createTable(tname); setNewTable(false); setTname(''); go(`#/table/${t.id}`); } }} /></label>
-          <div className="muted small">A table starts with a “Name” field. Add more fields with the + at the end of the header, link it to other tables, or paste rows from a spreadsheet.</div>
-        </Dialog>
-      )}
+      {newTable && <NewTableDialog onClose={() => setNewTable(false)} onCreated={(id) => { setNewTable(false); go(`#/table/${id}`); }} />}
     </div>
   );
 }

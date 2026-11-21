@@ -33,8 +33,9 @@ export function cellText(rec: ContentRecord, f: FieldDef, lk: Lookups): string {
   return displayValue(v);
 }
 
-export function copyRows(rows: ContentRecord[], fields: FieldDef[], lk: Lookups): string[][] {
-  return rows.map((r) => fields.map((f) => cellText(r, f, lk)));
+/** `shown` gives a cell's text when it is not the stored text (a formula copies its result); undefined keeps the default. */
+export function copyRows(rows: ContentRecord[], fields: FieldDef[], lk: Lookups, shown?: (rec: ContentRecord, f: FieldDef) => string | undefined): string[][] {
+  return rows.map((r) => fields.map((f) => shown?.(r, f) ?? cellText(r, f, lk)));
 }
 
 export interface PastePlan {

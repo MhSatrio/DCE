@@ -8,7 +8,7 @@
 export const DEFAULT_RELAY = 'http://127.0.0.1:8788';
 
 export interface BufferChannel { id: string; name: string; service: string; org: string }
-export interface SendOptions { text: string; channelId: string; mode: 'queue' | 'scheduled'; dueAt?: string; imageUrl?: string }
+export interface SendOptions { text: string; channelId: string; mode: 'queue' | 'scheduled'; dueAt?: string; imageUrls?: string[]; instagramType?: 'post' | 'story' | 'reel' }
 export interface SendResult { ok: boolean; postId?: string; dueAt?: string; error?: string }
 
 /** GraphQL string literal for arbitrary text (JSON string syntax is a valid GraphQL string). */
@@ -19,7 +19,12 @@ export function buildCreatePost(o: SendOptions): string {
   const parts = [`text: ${lit(o.text)}`, `channelId: ${lit(o.channelId)}`, 'schedulingType: automatic'];
   if (o.mode === 'scheduled' && o.dueAt) parts.push('mode: customScheduled', `dueAt: ${lit(o.dueAt)}`);
   else parts.push('mode: addToQueue');
-  if (o.imageUrl) parts.push(`assets: [{ image: { url: ${lit(o.imageUrl)} } }]`);
+  // Instagram needs the type of the post (a feed post, a story or a reel)
+  // Buffer needs shouldShareToFeed with the type (a story is not shared to the feed)
+  if (o.instagramType) parts.push(`metadata: { instagram: { type: ${o.instagramType}, shouldShareToFeed: ${o.instagramType !== 'story'} } }`);
+  // one image, or several for a carousel: each one is an entry of the assets list
+  const images = (o.imageUrls ?? []).filter((u) => u.length > 0);
+  if (images.length) parts.push(`assets: [${images.map((u) => `{ image: { url: ${lit(u)} } }`).join(', ')}]`);
   return `mutation { createPost(input: { ${parts.join(', ')} }) { ... on PostActionSuccess { post { id dueAt text } } ... on MutationError { message } } }`;
 }
 

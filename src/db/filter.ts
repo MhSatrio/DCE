@@ -1,6 +1,8 @@
 import { compareValues, isEmpty } from '../engine/expr';
 import { getValue } from './fields';
 import { db, INDEXED_RECORD_KEYS, type ContentRecord } from './schema';
+import { CONTENT_TABLE } from './constants';
+import { byPosition } from './order';
 
 export type Operator =
   | 'eq' | 'neq' | 'contains' | 'not_contains' | 'empty' | 'not_empty'
@@ -96,7 +98,12 @@ export function sortRecords(records: ContentRecord[], key: string | null, dir: '
  * Database-side query. For AND groups with an `equals` on an indexed field (status, template, slug…),
  * Dexie narrows via the index first and only the remainder is evaluated in memory.
  */
-export async function queryRecords(g: FilterGroup): Promise<{ records: ContentRecord[]; usedIndex: string | null }> {
+/** Records of a table that match the filter. The Content Plan has indexed lookups; a custom table is read and filtered in memory. */
+export async function queryRecords(g: FilterGroup, table: string = CONTENT_TABLE): Promise<{ records: ContentRecord[]; usedIndex: string | null }> {
+  if (table !== CONTENT_TABLE) {
+    const rows = (await db.rows.where('table').equals(table).toArray()).sort(byPosition);
+    return { records: applyFilter(rows, g), usedIndex: null };
+  }
   const cs = activeConditions(g);
   if (g.join === 'and') {
     const idx = cs.find((c) => c.op === 'eq' && INDEXED_RECORD_KEYS.has(c.field) && c.value !== '');
@@ -106,6 +113,6 @@ export async function queryRecords(g: FilterGroup): Promise<{ records: ContentRe
       return { records: applyFilter(rows, rest), usedIndex: idx.field };
     }
   }
-  const all = await db.records.orderBy('created_at').toArray();
+  const all = (await db.records.toArray()).sort(byPosition);
   return { records: applyFilter(all, g), usedIndex: null };
 }

@@ -1,9 +1,14 @@
 import { readGeminiKeyOf } from '../db/connections';
-import { coerce, getValue } from '../db/fields';
+import { coerce, displayValue, getValue } from '../db/fields';
 import { randomSlot } from './triggers';
 import { decryptSecret } from '../db/vault';
-import { db, getSetting, type AutoStep, type BatchConfig, type ContentRecord, type FieldType, type TimingConfig } from '../db/schema';
-import { allTables, createRows, fieldsOf, newRow, recordsOf, saveFieldIn, tableName, updateRow } from '../db/tables';
+import { db, getSetting, type AutoFilter, type AutoStep, type BatchConfig, type ContentRecord, type FieldType, type TimingConfig } from '../db/schema';
+import { matchGroup, type FilterGroup } from '../db/filter';
+import { allTables, createRows, deleteRows, fieldsOf, newRow, recordsOf, saveFieldIn, tableName, updateRow } from '../db/tables';
+import { r2Delete, r2FileOf, r2PublicBases } from '../cloud/client';
+import { sameFileAt } from '../cloud/addresses';
+import { unlinkEverywhere } from '../cloud/retention';
+import { remoteImage } from '../db/remote';
 import { uid } from '../engine/njs';
 import { renderTemplateString } from '../engine/binding';
 import { buildFillPrompt, parseFillOutput, parsePlaceholders, sourceTextOf } from '../connector/fill';
@@ -12,7 +17,7 @@ import type { ConnectorEvent } from '../connector/events';
 import { httpRequest } from '../connector/http';
 import { generate, withBackoff } from '../pipeline/gemini';
 import { createPost, DEFAULT_RELAY } from './buffer';
-import { channelLabelOf, fillTemplate, sourceOfValues, stepProblems } from './model';
+import { bufferAddressOf, bufferImageProblem, channelLabelOf, fillTemplate, imageLinksOf, sourceOfValues, stepProblems } from './model';
 
 /**
  * What each "Then" action really does. A step gets the current item (a record, or a website item), changes what it
@@ -122,17 +127,54 @@ export async function resolveBufferCredentials(connectionId: string, channelKey:
   } catch (e) { return { error: e instanceof Error ? e.message : String(e) }; }
 }
 
+/**
+ * Reads each image address now. An address that does not open its image is a problem (Buffer would fail later, after the post
+ * is made). A link on a Cloudflare development address is replaced by the bucket's current public address for the same file,
+ * when that address serves it.
+ */
+async function readableImages(addresses: string[]): Promise<{ urls: string[]; notes: string[]; problems: string[] }> {
+  const bases = await r2PublicBases();
+  const urls: string[] = [];
+  const notes: string[] = [];
+  const problems: string[] = [];
+  for (const address of addresses) {
+    const candidates = [...bases.map((b) => sameFileAt(address, b)).filter((x): x is string => x !== null), address];
+    const reasons: string[] = [];
+    let found: string | null = null;
+    for (const c of candidates) {
+      const got = await remoteImage(c);
+      if (got.ok) { found = c; break; }
+      reasons.push(`${c} (${got.reason})`);
+    }
+    if (found) {
+      urls.push(found);
+      if (found !== address) notes.push(`The image of ${address} is sent from the bucket’s current public address, ${found}.`);
+    } else problems.push(`“${address}” does not open a public image: ${reasons.join('; ')}.`);
+  }
+  return { urls, notes, problems };
+}
+
 async function bufferPost(s: Extract<AutoStep, { kind: 'buffer_post' }>, cur: Cur, o: RunCtx): Promise<StepOut> {
   if (cur.alreadyPosted) return { status: 'skipped', detail: 'A post for this item was already made, so it is not made again.' };
   const text = render(s.text, cur).trim();
   if (!text) throw new Error('The post text is empty for this item.');
   const notes: string[] = [];
-  let imageUrl: string | undefined;
+  let imageUrls: string[] = [];
   if (s.imageField) {
-    const v = asText(cur.values[s.imageField]).trim();
-    if (/^https:\/\//i.test(v)) imageUrl = v;
-    else if (v) notes.push('The image is not a public https:// address, so the post goes without it.');
+    const raw = cur.values[s.imageField];
+    const got = imageLinksOf(Array.isArray(raw) ? raw.join(' ') : raw);
+    imageUrls = got.links;
+    notes.push(...got.notes);
   }
+  // Buffer reads each image itself: an address it cannot read is refused here, before anything is sent to it
+  const unreadable = imageUrls.map((u) => bufferImageProblem(u)).find((p): p is string => p !== null);
+  if (unreadable) throw new Error(unreadable);
+  // Buffer fetches each image itself, so each address must open its image now; an address that does not is refused here,
+  // before anything is sent to Buffer
+  const checked = await readableImages(imageUrls.map(bufferAddressOf));
+  if (checked.problems.length) throw new Error(`Buffer cannot post this: ${checked.problems.join(' ')} Upload the file again with the Batch Runner, or fix the link in the record. Nothing was sent to Buffer.`);
+  imageUrls = checked.urls;
+  notes.push(...checked.notes);
   let timing: Timing;
   if (s.timing.mode === 'field') {
     if (!cur.home) throw new Error('Website items have no date field: use “next free slot” or “after a delay” timing.');
@@ -144,14 +186,14 @@ async function bufferPost(s: Extract<AutoStep, { kind: 'buffer_post' }>, cur: Cu
   if ('error' in creds) throw new Error(creds.error);
   const when = timing.mode === 'queue' ? 'in the next free slot' : `at ${timing.dueAt}`;
   const channel = channelLabelOf(s.channel);
-  if (o.dry) return { status: 'dry', detail: `Would post to ${channel} ${when}: “${preview(text)}”${imageUrl ? ' + image' : ''}` };
+  if (o.dry) return { status: 'dry', detail: `Would post to ${channel} ${when}: “${preview(text)}”${imageUrls.length ? ` + ${imageUrls.length} image${imageUrls.length > 1 ? 's' : ''}` : ''}` };
   const relay = await getSetting<string>('relay.url', DEFAULT_RELAY);
-  const res = await createPost(relay, creds.apiKey, { text, channelId: creds.channelId, imageUrl, mode: timing.mode === 'scheduled' ? 'scheduled' : 'queue', dueAt: timing.mode === 'scheduled' ? timing.dueAt : undefined });
+  const res = await createPost(relay, creds.apiKey, { text, channelId: creds.channelId, imageUrls, mode: timing.mode === 'scheduled' ? 'scheduled' : 'queue', dueAt: timing.mode === 'scheduled' ? timing.dueAt : undefined, instagramType: /INSTAGRAM/i.test(s.channel) ? (s.instagramType ?? 'post') : undefined });
   if (!res.ok) throw new Error(res.error ?? 'Buffer did not accept the post.');
   cur.posted = true;
   // the post exists now: a problem storing its id must not fail the step, or a retry would post it again
   if (s.resultField && cur.home && res.postId) {
-    try { await setCell(cur.home, cur.base, s.resultField, res.postId); } catch (e) { notes.push(`The post id could not be stored: ${e instanceof Error ? e.message : String(e)}`); }
+    try { await setCell(cur.home, cur.base, await resultFieldKey(s.resultField, cur.home), res.postId); } catch (e) { notes.push(`The post id could not be stored: ${e instanceof Error ? e.message : String(e)}`); }
   }
   return { status: 'ok', detail: `Sent via “${creds.account}” to ${channel} ${when}${notes.length ? ' — ' + notes.join(' ') : ''}`, postId: res.postId, dueAt: res.dueAt };
 }
@@ -237,24 +279,124 @@ async function addRow(s: Extract<AutoStep, { kind: 'add_row' }>, cur: Cur, o: Ru
   if (o.dry) return { status: 'dry', detail: `Would add or update a row in ${tableName(s.table)} with ${Object.keys(values).length} column(s).` };
   const id = rowIdFor(cur, s.table);
   await ensureColumns(s.table, Object.entries(values).map(([key, sample]) => ({ key, sample })));
+  // a value is typed as the column it goes into: a choice must be one of the choices, a number a number, and so on
+  const known = fieldsOf(s.table);
+  const typed: Record<string, unknown> = {};
+  for (const [key, raw] of Object.entries(values)) {
+    const f = known.find((x) => x.key === key);
+    if (!f) { typed[key] = raw; continue; }
+    const c = coerce(raw, f);
+    if (c.error) throw new Error(`“${raw}” is not a valid value for “${f.label}”: ${c.error}`);
+    typed[key] = c.value;
+  }
   const existing = recordsOf(s.table).find((r) => r.id === id);
-  const title = values.name || values.title || cur.title;
-  const data = { ...(existing?.data ?? {}), ...values };
+  const title = String(typed.name || typed.title || cur.title);
+  const data = { ...(existing?.data ?? {}), ...typed };
   const rec = existing ? { ...existing, title, data } : newRow(s.table, { id, title, data });
   if (!(await createRows(s.table, [rec], true))) throw new Error('The row could not be saved (browser storage).');
   cur.table = s.table;
-  cur.values = { ...cur.values, ...values };
+  cur.values = { ...cur.values, ...typed };
   return { status: 'ok', detail: `Row saved in “${tableName(s.table)}” (${Object.keys(values).length} column(s))` };
+}
+
+/** The records a step acts on: the record that started the automation, or every record where the field has the value. */
+function rowsFor(match: { field: string; value: string } | undefined, table: string, cur: Cur): ContentRecord[] {
+  if (!match) {
+    const row = targetRow(cur, table);
+    return row ? [row] : [];
+  }
+  const f = fieldsOf(table).find((x) => x.key === match.field);
+  if (!f) throw new Error(`The field “${match.field}” does not exist in ${tableName(table)}.`);
+  const want = render(match.value, cur).trim().toLowerCase();
+  if (!want) throw new Error('The value that finds the record is empty. Give the value to look for.');
+  return recordsOf(table).filter((r) => displayValue(getValue(r, f.key)).trim().toLowerCase() === want);
+}
+
+/** Writes several values into one row, with the rules the table uses (type check, read-only and sync fields refused). One change. */
+async function setCells(table: string, id: string, changes: { key: string; raw: string }[]): Promise<void> {
+  const rec = recordsOf(table).find((r) => r.id === id);
+  if (!rec) throw new Error('The row is not in the table.');
+  const patch: Partial<ContentRecord> = {};
+  const data: Record<string, unknown> = { ...rec.data };
+  for (const { key, raw } of changes) {
+    const f = fieldsOf(table).find((x) => x.key === key);
+    if (!f) throw new Error(`The field “${key}” does not exist in ${tableName(table)}.`);
+    if (f.readonly || f.sync) throw new Error(`“${f.label}” cannot be changed by an automation.`);
+    const c = coerce(raw, f);
+    if (c.error) throw new Error(`“${raw}” is not a valid value for “${f.label}”: ${c.error}`);
+    if (f.builtin) (patch as Record<string, unknown>)[key] = c.value;
+    else data[key] = c.value;
+  }
+  await updateRow(table, id, { ...patch, data });
+}
+
+const POST_ID_KEY = 'buffer_post_id';
+/** The field that receives a Buffer post id: the one chosen, or “Buffer post id” made the first time the choice is “create”. */
+async function resultFieldKey(field: string, table: string): Promise<string> {
+  if (field !== '__create__') return field;
+  if (!fieldsOf(table).some((f) => f.key === POST_ID_KEY)) {
+    await saveFieldIn(table, { id: uid(), key: POST_ID_KEY, label: 'Buffer post id', type: 'text', order: Math.max(0, ...fieldsOf(table).map((f) => f.order)) + 1 });
+  }
+  return POST_ID_KEY;
+}
+
+/** The https addresses in a field's value (one, or several separated by commas or new lines). */
+const linksIn = (value: unknown): string[] => String(value ?? '').split(/[\s,;]+/).filter((x) => /^https?:\/\//i.test(x));
+
+/** The file a link points at in a connected bucket (see r2FileOf). */
+type FileHit = NonNullable<Awaited<ReturnType<typeof r2FileOf>>>;
+
+/**
+ * Delete a record. With a file field, every link in that field is read first: a comma, a semicolon, a space or a new line
+ * separates them. When one link is not a file of a connected bucket, nothing is deleted, the records keep all their links, and
+ * the message names every such link. Otherwise each file is deleted on its own, its link is removed from every record that
+ * holds it, and then the record is deleted.
+ */
+async function deleteRecordStep(s: Extract<AutoStep, { kind: 'delete_record' }>, cur: Cur, o: RunCtx): Promise<StepOut> {
+  needTable(s.table);
+  const rows = rowsFor(s.match, s.table, cur);
+  if (!rows.length) throw new Error(s.match ? 'No record matches the condition of this action.' : 'This item is not in the table, so there is no record to delete. Choose “The record where…” instead.');
+  if (o.dry) return { status: 'dry', detail: `Would delete ${rows.length} record(s) in ${tableName(s.table)}${s.fileField ? ' and their files in Cloudflare R2' : ''}.` };
+  const plan: { row: ContentRecord; hits: { url: string; hit: FileHit }[] }[] = [];
+  const outside: string[] = [];
+  for (const row of rows) {
+    const hits: { url: string; hit: FileHit }[] = [];
+    if (s.fileField) {
+      for (const url of linksIn(getValue(row, s.fileField))) {
+        const hit = await r2FileOf(url);
+        if (hit) hits.push({ url, hit }); else outside.push(url);
+      }
+    }
+    plan.push({ row, hits });
+  }
+  if (outside.length) {
+    throw new Error(`${outside.length === 1 ? 'This link is' : `${outside.length} of these links are`} not a file of a connected Cloudflare R2 bucket, so nothing was deleted and the records are kept: ${outside.map((u) => `“${u}”`).join(', ')}.`);
+  }
+  let files = 0;
+  let unlinked = 0;
+  for (const { row, hits } of plan) {
+    for (const { url, hit } of hits) {
+      const r = await r2Delete(hit.conn, hit.key);
+      if (!r.ok) throw new Error(`The file ${hit.key} could not be deleted from R2 (${String(r.error ?? 'unknown reason')}). The record is kept with the links that are left; the files before it were deleted.`);
+      files++;
+      unlinked += await unlinkEverywhere(url);
+    }
+    await deleteRows(s.table, [row.id]);
+  }
+  return { status: 'ok', detail: `${rows.length} record(s) deleted${files ? `, with ${files} file(s) from Cloudflare R2, one by one` : ''}${unlinked ? `, and ${unlinked} link(s) to them removed from other records` : ''}` };
 }
 
 async function setField(s: Extract<AutoStep, { kind: 'set_field' }>, cur: Cur, o: RunCtx): Promise<StepOut> {
   needTable(s.table);
-  const row = targetRow(cur, s.table);
-  if (!row) throw new Error('This item is not in the table yet. Put an “Add or update a row” action before this one.');
-  const value = render(s.value, cur);
-  if (o.dry) return { status: 'dry', detail: `Would set ${s.field} = ${value || '(empty)'} in ${tableName(s.table)}.` };
-  await setCell(s.table, row.id, s.field, value);
-  return { status: 'ok', detail: `${s.field} = ${value || '(empty)'}` };
+  const changes = [{ key: s.field, raw: s.value }, ...(s.also ?? []).map((c) => ({ key: c.field, raw: c.value }))].filter((c) => c.key);
+  if (!changes.length) throw new Error('Choose the field to update.');
+  const rows = rowsFor(s.match, s.table, cur);
+  if (!rows.length) throw new Error(s.match ? 'No record matches the condition of this action.' : 'This item is not in the table, so there is no record to update. Choose “The record where…” instead.');
+  const values = changes.map((c) => ({ key: c.key, raw: render(c.raw, cur) }));
+  const summary = values.map((v) => `${v.key} = ${v.raw || '(empty)'}`).join(', ');
+  if (o.dry) return { status: 'dry', detail: `Would update ${rows.length} record(s) in ${tableName(s.table)}: ${summary}.` };
+  for (const row of rows) await setCells(s.table, row.id, values);
+  return { status: 'ok', detail: `${rows.length} record(s) updated in ${tableName(s.table)}: ${summary}` };
 }
 
 async function syncPostsStep(s: Extract<AutoStep, { kind: 'sync_posts' }>, o: RunCtx): Promise<StepOut> {
@@ -272,22 +414,31 @@ async function renderFile(s: Extract<AutoStep, { kind: 'render' }>, cur: Cur, o:
   needTable(s.table);
   const row = targetRow(cur, s.table);
   if (!row) throw new Error('This item is not in the table, so there is nothing to render.');
-  if (o.dry) return { status: 'dry', detail: `Would render “${tpl.name}” as ${s.format}.` };
+  const { DEFAULT_DEST, destinationName, prepareDestination } = await import('../batch/destination');
+  const dest = s.dest ?? DEFAULT_DEST;
+  const uploads = dest.kind !== 'zip';
+  if (o.dry) return { status: 'dry', detail: `Would render “${tpl.name}” as ${s.format}${uploads ? ` and upload it to ${destinationName(dest)}` : ''}.` };
+  // the destination is checked before anything is rendered, as in the Batch Runner: a missing account or folder stops here
+  const prepared = uploads ? await prepareDestination(dest, s.table) : { destination: undefined, error: undefined };
+  if (prepared.error) throw new Error(prepared.error);
   const { BatchRun, defaultConcurrency } = await import('../batch/runner');
   const { download } = await import('../ui/kit');
   const config: BatchConfig = {
-    templateId: tpl.id, database: 'content_plan', selection: 'individual', filter: { join: 'and', conditions: [] }, format: s.format,
+    templateId: tpl.id, selection: 'individual', filter: { join: 'and', conditions: [] }, format: s.format,
     pdfMode: 'separate', outW: tpl.width, outH: tpl.height, quality: 0.92, transparent: false, filenamePattern: '{{content.slug}}',
     includeManifest: true, concurrency: defaultConcurrency(),
   };
-  const run = new BatchRun({ config, doc: tpl.doc, templateName: tpl.name, records: [row], selectionLabel: `Automation item ${cur.key}` });
+  const run = new BatchRun({ config, doc: tpl.doc, templateName: tpl.name, records: [row], table: s.table, selectionLabel: `Automation item ${cur.key}`, destination: prepared.destination, keepZip: dest.keepZip });
   void run.start();
   await run.done;
   const st = run.store.get();
   if (st.status !== 'completed' && st.status !== 'completed_with_errors') throw new Error(st.error ?? `The render ended as “${st.status}”.`);
   if (st.ok === 0) throw new Error(st.failures[0]?.error ?? 'The item could not be rendered.');
-  if (st.output) download(st.output.blob, st.output.name);
-  return { status: 'ok', detail: `${st.ok} file(s) rendered${st.output ? ' and downloaded' : ''}` };
+  // without an upload the ZIP is the result, so it is downloaded; with an upload it is downloaded only when it is kept
+  const keptZip = !prepared.destination || dest.keepZip;
+  if (st.output && keptZip) download(st.output.blob, st.output.name);
+  const sent = prepared.destination ? ` and uploaded to ${destinationName(dest)}` : '';
+  return { status: 'ok', detail: `${st.ok} file(s) rendered${sent}${st.output && keptZip ? ' and downloaded' : ''}` };
 }
 
 /**
@@ -308,6 +459,24 @@ async function randomTime(s: Extract<AutoStep, { kind: 'random_time' }>, cur: Cu
   return { status: 'ok', detail: `${s.field} set to ${value}` };
 }
 
+/**
+ * The item as an action's condition sees it at this moment: the record as it is now (an earlier action may have changed it).
+ * A website item has no record, so its values stand for its fields.
+ */
+export function itemNow(cur: Cur): ContentRecord {
+  if (cur.home && !cur.event) {
+    const live = recordsOf(cur.home).find((r) => r.id === cur.key);
+    if (live) return live;
+  }
+  // the table name only tells getValue to read the values as data (a website item has no table of its own)
+  return { id: cur.key, table: cur.home || 'item', data: cur.values } as unknown as ContentRecord;
+}
+
+/** Whether the action runs for this item: its own condition holds (no condition: always). The same rules as a trigger's conditions. */
+export function actionRuns(filter: AutoFilter | undefined, cur: Cur): boolean {
+  return !filter || matchGroup(itemNow(cur), filter as FilterGroup);
+}
+
 /** Runs one step for the current item. Throws on failure; StopItem when the item must not be retried. */
 export async function runStep(s: AutoStep, cur: Cur, o: RunCtx): Promise<StepOut> {
   const problems = stepProblems(s);
@@ -319,6 +488,7 @@ export async function runStep(s: AutoStep, cur: Cur, o: RunCtx): Promise<StepOut
     case 'http': return httpCall(s, cur, o);
     case 'add_row': return addRow(s, cur, o);
     case 'set_field': return setField(s, cur, o);
+    case 'delete_record': return deleteRecordStep(s, cur, o);
     case 'sync_posts': return syncPostsStep(s, o);
     case 'render': return renderFile(s, cur, o);
     case 'random_time': return randomTime(s, cur, o);

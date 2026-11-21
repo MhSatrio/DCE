@@ -111,6 +111,13 @@ export function isBoundVisible(node: DceNode, scope: Record<string, unknown> | n
   return r.value;
 }
 
+/** The reference of an image drawn with its background removed: the same image under this prefix. */
+export const CUTOUT_PREFIX = 'cutout:';
+/** Background removal of an image taken from a field: the tolerance of the colour match (as in Assets). */
+export const CUTOUT_TOLERANCE = 40;
+export const isCutoutRef = (r: string): boolean => r.startsWith(CUTOUT_PREFIX);
+export const cutoutBaseRef = (r: string): string => (isCutoutRef(r) ? r.slice(CUTOUT_PREFIX.length) : r);
+
 /** Which image references does this node need for this record? */
 export function imageRefsFor(node: DceNode, scope: Record<string, unknown> | null): { primary: string | null; fallback: string | null } {
   const c: NodeConstraints = node.constraints ?? {};
@@ -120,7 +127,8 @@ export function imageRefsFor(node: DceNode, scope: Record<string, unknown> | nul
     const v = lookup(scope, b.key);
     const primary = !isEmpty(v) ? normRef(typeof v === 'string' ? v : Array.isArray(v) ? v[0] : String(v)) : null;
     const fallback = normRef(b.fallback) ?? normRef(c.fallbackAssetId) ?? own;
-    return { primary, fallback };
+    const cut = (r: string | null) => (r && b.cutout ? CUTOUT_PREFIX + r : r);
+    return { primary: cut(primary), fallback: cut(fallback) };
   }
   return { primary: own, fallback: normRef(c.fallbackAssetId) };
 }
@@ -223,7 +231,7 @@ function resolveNode(n: DceNode, ctx: Ctx, parentOpacity: number): Item | null {
         else {
           const key = n.binding?.image?.key;
           const ph = key ? ctx.ph.get(key) : undefined;
-          const msg = refs.primary ? `Image "${refs.primary}" could not be loaded` : key ? `Image field ${key} is empty` : 'No image selected';
+          const msg = refs.primary ? `Image "${cutoutBaseRef(refs.primary)}" could not be loaded` : key ? `Image field ${key} is empty` : 'No image selected';
           if (missing === 'error' || ph?.required) { note(ctx, 'error', n, `${msg}.`); return null; }
           note(ctx, 'warning', n, `${msg}.`);
           if (missing === 'hide') return null;

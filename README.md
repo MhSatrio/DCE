@@ -306,6 +306,237 @@ sync and render, a second check that repeats nothing, and the history with each 
 placeholders, the Gemini answer check, event reading and the HTTP helper's rules. **Not exercised: the live VierApparatus site,
 a live Gemini key and a live social account.**
 
+## Tables: master fields, carousels, synced marks, cloud destinations, asset tools (1.7.0)
+
+**Master Field.** Every table names its records with one field, its Master Field. By default it is the leftmost field. Right-click another field's header and choose **Set as Master Field**: that field moves to the first column and stays in view while you scroll sideways. A synced field cannot be the Master Field, and the Master Field cannot be turned into a synced field. Other tables show a record by its Master Field when they link to it.
+
+**Synced fields.** A ⚡ mark sits beside each synced field's name. Hover over it for `Linked to: Table name → Field name`. The sidebar marks tables that contain synced fields.
+
+**Carousel tables.** *New table → Carousel table*: choose the source table, the field that holds each image's URL, and how many consecutive images make one carousel (1–3 … 1–20, or a custom number). DCE then creates a separate table with one record per carousel, named by its Master Field ("Carousel 1", "Carousel 2" …). Its *Carousel* field holds the URLs of that carousel, comma separated, ready for Buffer. Two fields are added to the source table: **Carousel Page** (shows `Page N of Carousel M`, read from the carousel's Master Field, so a rename shows at once) and **Page number**.
+* With 100 images and 10 per carousel there are exactly 10 carousel records; the source keeps its 100 records.
+* When images are added, changed or removed, the carousels are rebuilt from the source. A carousel with no image left is removed. The carousel records keep their ids, so nothing is duplicated, and any custom fields you add to a carousel table are kept.
+* A record without a URL is not part of any carousel. The last carousel may hold fewer images.
+* Order: the order in which the source records were created.
+
+**Batch Runner destinations.** In the *Where the files go* panel, choose one of:
+* **Download ZIP only** (as before).
+* **Upload to Cloudflare R2.** Add the bucket under *Settings → Cloud destinations*: the S3 endpoint, the bucket, the public address (`https://pub-….r2.dev` or your own domain; without it the links would not open), an optional folder inside the bucket, and an access key id and secret with *Object Read & Write*. Uploads are signed (AWS Signature Version 4) and sent through the local relay.
+* **Upload to a Google Drive folder.** In Google Cloud, create an OAuth client of type *Desktop app* and enable the Google Drive API. Under *Settings → Cloud destinations*, enter its client ID and secret and press *Connect*: your browser opens Google's sign-in, which returns to this computer. DCE asks for the `drive` scope, which is needed to upload into folders you did not create. Then give the folder: paste its link (or id) and press *Check folder*, or browse your folders.
+
+For either destination, the link of every file is written into the **Uploaded link** field (a URL field, created when it is missing) of the record it belongs to, in the table you choose. Files are sent one at a time. A file with the same name in the folder is replaced, not duplicated. A problem is counted against its record with its reason: the upload failed, the file is online but its link could not be written, or the record is not in the chosen table. Retrying failed records re-renders them to ZIP only.
+
+**Asset tools.**
+* **Remove background** (images in *Assets*): the background is the colour of the image's border; pixels of that colour connected to the border become transparent, with a soft edge. The result is a new transparent PNG; the original stays. This works for plain or evenly lit backgrounds (product photos on white, logos, icons). It does not separate a subject from a busy background; that needs a segmentation model, which is not part of this release.
+* **Trace to SVG**: converts the image to vector shapes of its colours (low, medium or high detail). Made for flat illustrations, icons and logos. The SVG is stored as an asset.
+* **Edit SVG** for SVG assets: the vector editor described in the next section. Each saved SVG also keeps a PNG of itself, so a traced or edited SVG draws in templates and in the batch renderer.
+
+**Tested.** Unit tests: carousel grouping, the cloud routes against mock Google and mock R2 (signing, folder links, uploads with replacement, the sign-in flow), and the asset routines. End to end: carousel creation, the Carousel Page text, live regrouping on delete, the Master Field, the synced mark and the rule against a synced master (`tests/e2e/carousel.mjs`); the Batch Runner destinations with mock R2 and mock Google (`tests/e2e/cloud.mjs`). The existing editor, batch, connect and website suites still pass.
+**Not verified:** a live Google Drive account, a live R2 bucket, and how Buffer handles Drive or R2 links. The background removal and tracing quality on real photographs.
+
+## Closing slides, fill handle, vector SVG editor (1.8.0)
+
+**Closing slide for carousels.** In *New table → Carousel table*, choose **Closing slide**: any image in *Assets* that has a public address. Each carousel then holds the table's images in its first slots and the closing image as its last slide. With 1–10, slides 1–9 are images from the table and slide 10 is the closing image, in every carousel. The *Carousel* field lists the URLs in that order for Buffer; the *Images* count is the number of slides. Giving the closing image a new address updates every carousel that ends with it. If the closing image is deleted or loses its address, that carousel table keeps its last good records and shows one warning until the image has an address again.
+
+**Public address in Assets.** The detail panel of an image shows **Public address**, which Buffer and the carousels use; without one, the address the image was imported from is used. Save it with *Save* or Enter; *Copy* copies it. Each card shows its address.
+
+**Fill handle (spreadsheet fill).** Select cells, then drag the small square at the bottom-right corner of the selection down. The selection repeats in the rows below it. With **Shift or Ctrl** held, a column of plain numbers counts on instead: 5 → 6, 7, 8; 10, 20 → 30, 40 (the step is the difference of the last two). Other columns are copied. Dragging past the last row creates new records, after a confirmation, as paste does. Links, images and read-only fields are handled exactly as in paste.
+
+**Vector SVG editor** (*Assets → an SVG asset → Edit SVG*):
+* Click a shape to select it, then drag its points (squares) and handles (circles). Moving a point carries its handles with it, and a Bézier curve keeps its shape.
+* Click the small **+** on a line to add a point there; the curve is split without changing its shape. Delete removes the selected point, or the whole shape when no point is selected.
+* The fill colour of the selected shape, and *Colours in this drawing*, which recolours every shape of one colour at once. The x and y of a selected point can be typed.
+* Undo and Redo (Ctrl+Z, Ctrl+Y), zoom, and a *Code* tab with the SVG text.
+* *Save changes* writes the same asset, so every template that draws it shows the new version. *Save as new asset* keeps the original.
+* An uploaded SVG file is rasterised on import, as before. To edit a drawing, trace an image to SVG, or save an edited SVG.
+
+**Tested.** Unit tests (`npx vitest run --no-file-parallelism`): carousel grouping with a closing slide, the SVG document model (reading and writing paths, moving points and handles, inserting and deleting points, colours), and the fill values (copying, counting on). End to end (`tests/e2e/fill-svg-closing.mjs`, 9 checks): the fill handle copies, counts with Shift and creates records past the last row; a closing-slide carousel, and its update when the closing image's address changes; the SVG editor's drag, recolour, save and undo, with nothing saved while editing.
+**Not verified:** very large traced drawings (thousands of shapes) and touch screens.
+
+## Template images from a web address in a record field (1.9.0)
+
+**Choosing the field.** In the template editor, select an image element, press *Choose…* and switch to **From a record field**. Pick a field of the table (a text, URL or image field). The element then takes its image from each record's value:
+* an `https://` address is downloaded when the batch runs (and for the preview), then drawn like an uploaded image. Nothing is added to *Assets*;
+* the name or id of an uploaded image uses that image;
+* a record whose field is empty uses the element's fallback, or the static image chosen before.
+
+**How the download works.** The page first tries the address directly. If the server does not allow that (no CORS, which is most image hosts), the local helper downloads it. The helper accepts JPEG, PNG, WebP and GIF only, judged by the bytes (not by the file name or the type the server claims); it refuses SVG (it can contain scripts) and web pages; it refuses addresses in private networks, follows at most five redirects, and stops at 25 MB or 30 s per image. Downloads of the same address are reused during a session.
+
+**When a download fails.** The record fails in the batch with the reason (not found, refused, not an image, …). It is not drawn with the fallback, so a wrong link cannot pass unnoticed.
+
+**Removing the background (1.9.1).** In the Data tab, under *Image binding*, tick **Automatically delete image background**. When the image is drawn (the preview and the batch), the background that touches the image's border is made transparent, so the product stands on the frame's colour or on the template. It works on plain or white backgrounds, as the Remove background tool in Assets does; a busy photo background is not separated. The file, the record and the Assets library are not changed. A ticked field also cuts out its fallback image.
+
+**Tested.** Unit (`tests/unit/remote-image.test.ts`, 14): the recognition of image bytes, the refusals, redirects, the size limit, private addresses, and the helper's route. End to end (`tests/e2e/remote-images.mjs`, 3 checks): the picker saves the field, the batch downloads through the helper (the mock server sends no CORS headers), follows a redirect, and fails the records whose image is missing or is a web page, each with its reason.
+**Not verified:** a live image host, and very large batches (thousands of different addresses) in the packaged app.
+
+## Asset library, background removal, traced drawings, rulers, vector pack (1.10.0)
+
+**Folders.** *Assets* has a folder list on the left: *All assets*, one button per folder with its count, *New folder*, and *Delete folder* (its assets move to “Uncategorised”; nothing is deleted). An upload goes into the folder that is open.
+
+**Vector drawings.** An uploaded SVG is kept as a vector: its drawing text is the asset (open it with *Edit SVG*), and a PNG of it is made for the templates. Before 1.10.0 uploaded SVGs were rasterised.
+
+**VierApparatus vector pack.** *Install vector pack* adds 50 drawings with no background to the folder “VierAsset”: 20 pieces of lab equipment (microscope, centrifuge, micropipette, flasks, burette, balance, incubator, spectrophotometer, …) and 30 science drawings (phylogenetic trees, molecules, cells, bacteria, a DNA helix, a virus, an atom, charts). Every shape is a filled path, so each point can be edited. Installing again adds only what is missing. The drawings are generated by `scripts/vier-pack/build.mjs`.
+
+**Background removal.** The background is learned from the picture's border as several colours, each with its own tolerance, so a soft backdrop works too. Colours are compared in CIE L*a*b*. The removal starts at the border and stops at outlines, so a light product on a white backdrop keeps its own light parts (the platter of a balance). *Assets → Remove background* has a live before/after preview, the tolerance slider, and *Also remove background-coloured areas inside the outline* for line art (the white inside a drawn flask). The template option *Automatically delete image background* uses the same method at the default tolerance.
+**Limit:** a product whose colour is close to its backdrop (clear glass on a blue backdrop, a white plastic tube on white) goes with the backdrop; colour alone cannot tell them apart.
+
+**Traced drawings you can edit.** *Trace to SVG* has two modes: *Colour areas* (flat illustrations, logos) and *Line art* (the ink of a drawing becomes outline shapes, the paper is dropped). The traced file has no invisible layer and no outline stroke, so changing a shape's fill changes the whole shape. Its points are edited in the SVG editor.
+
+**Web addresses (1.10.1).** *Assets → From URL* and the template images accept a Google Drive share link (`drive.google.com/file/d/…/view`). The file must be shared as “Anyone with the link”; DCE then downloads the file itself, through the local helper, and names it “Google Drive image …”. If Google sends a page instead of the file, the import says so.
+
+**Rulers.** The template editor shows rulers along the top and the left, in document pixels, with marks that follow the zoom and a red mark at the pointer. Drag from a ruler to pull out a guide; drag a guide to move it; drag it back onto its ruler to remove it; click the *px* corner to clear all. Guides are a view aid and are not saved in the template.
+
+**Tested.** Unit: the background method (8 tests: colour model, gradient backdrop, noise, enclosed areas, tolerance), the trace clean-up (4), the folder list, the ruler marks and the pack (7: every drawing parses as filled paths, none is a background-sized shape). End to end (`tests/e2e/library-rulers.mjs`, 6 checks): folders and vector uploads, the pack install (50, and no duplicates on a second install), tracing and editing a traced image (fill changed, saved into the same asset, no stroke), the Remove background preview, and the rulers with a guide pulled out and removed.
+**Not verified:** the background method on many real product photos (checked by eye on a sample of catalogue photos, not against masks); touch input for the rulers.
+
+## Formulas, undo and folder import (1.11.0)
+
+**Formula fields.** *Fields → Add custom field →* **Calculated → Formula**. A formula starts with `=`. `[Column]` is the value of a column in the same row, `A1` is the first column of the first row (the same addresses as a spreadsheet, columns in field order, rows in creation order), `A1:A10` is a range. Operators are `+ - * / ^ &`, `%` and the comparisons `= <> < >`; functions are listed in the editor (SUM, AVERAGE, ROUND, IF, IFERROR, AND, OR, CONCATENATE, LEFT, MID, …). A formula cell is calculated when the table is shown, and a formula can use another formula's result.
+
+**Editing a formula.** Double-click a formula cell and type. The ⤢ button opens the large editor: the formula with its live result for this row, a syntax message that holds Save back, buttons that insert a column or a function at the cursor, and Ctrl+Enter to save.
+
+**Formulas in amounts and numbers.** A currency, percent or number cell also takes a formula (`=[Qty]*1.5`) and shows its result. A currency cell's ⤢ button opens the same editor.
+
+**Undo and redo.** Ctrl+Z undoes the last change to a table: a cell, a row added or deleted, a field added, changed or deleted. Ctrl+Y or Ctrl+Shift+Z redoes it. The Undo and Redo buttons in the toolbar do the same. The last 100 changes are kept while the app is open (not after a restart). Typing inside a cell keeps the browser's own undo.
+
+**Browse folder (Assets).** *Browse folder…* next to *Install vector pack* opens the system folder dialog. Every SVG, PNG, JPEG, WebP and GIF in the folder goes into the library, in a folder named after it; other files are skipped. A drawing already in the library is not added again. The VierApparatus pack line no longer carries its description text.
+
+**Copying a formula (1.12.0).** Copying a formula cell (Ctrl+C or the cell menu's Copy) copies its result, the number a spreadsheet would show, so a paste into a spreadsheet or into another cell gives the value. Pasting a value over a formula cell replaces the formula. To copy the formula itself, use **Copy formula** in the large editor (⤢), or the copy button next to the formula in the record details. Exports write the formula text too; importing that text gives back a formula.
+
+**Tested.** Unit: the formula engine (19 tests: references, precedence, `-2^2`, rounding, IF, Excel error codes, text, self-reference as #CIRC!). End to end: `tests/e2e/table-formulas.mjs` (13 checks: a formula field, typing in formula, currency and number cells, the large editor and its Copy formula, the record details, copying a cell gives its result, nested results, undo and redo of field, cell and row changes, no console errors) and `tests/e2e/assets-folder.mjs` (4 checks: the folder import, a second import adds nothing).
+
+## Downloads, ruler guides and automation output (1.13.0)
+
+**Download a template as a file.** The download button on a template card, and *Download* in the editor's toolbar, open one menu: the **.njs design file**, or the drawing as **PNG**, **JPEG**, **PDF**, **SVG** or **HTML**. The drawing is the render the Batch Runner uses, at the template's own size, with its sample record; the editor uses the record picked in its preview and includes unsaved changes. The `.njs` file still embeds the assets.
+
+**Ruler guides are magnets.** A guide pulled from a ruler stays until it is dragged back onto its ruler (or *Clear all guides* is pressed). An element moved near a guide snaps its left, centre or right edge (or its top, middle or bottom) onto it, within 10 screen pixels, before the grid and before the edges of other elements. The magnet button turns it off. Guides are a view aid: they are not saved in the template, and resizing does not snap to them yet.
+
+**Automation renders can upload.** A *Render with the batch runner* step has the same *Where the files go* choice as the Batch Runner: download the ZIP, upload to a Cloudflare R2 bucket, or upload to a Google Drive folder. The link of every file is written into the Uploaded link field of its record (or the field you choose). Without an upload the ZIP is downloaded, as before; with an upload it is downloaded only when *Also keep a ZIP download* is ticked. The upload is checked before anything is rendered, and the run history says where the files went.
+
+**Tested.** End to end: `tests/e2e/template-export.mjs` (5 checks: the menu, each format's file type and size, the editor's menu with unsaved changes), `tests/e2e/ruler-guides.mjs` (6 checks: a guide from each ruler, the magnet stops an element on it and not on the grid, snapping off, a guide removed by dragging it back, guides not saved), and `tests/e2e/cloud.mjs` (7 checks, including an automation step that renders every record and uploads it to the mock R2).
+
+## Deleting a record with its files, one link at a time (1.23.1)
+
+A field can hold several links. Each one is read on its own: a comma, a semicolon, a space or a new line separates them, so a carousel record with four links has four files.
+
+Before anything is deleted, every link is checked. When one link is not a file of a connected Cloudflare R2 bucket, nothing is deleted, the records keep all their links, and the history names every link that is not in the bucket. Before, the step deleted the files before the bad link, so the record was left half deleted.
+
+When all links are files of the bucket, each file is deleted with its own request, its link is removed from every record that holds it, and then the record is deleted.
+
+**Known issue, not changed here.** Carousel records are numbered by their position. When “Carousel 1” is deleted, the next two slides become “Carousel 1” again, and the groups shift. Deleting it a second time would delete those slides’ files. Fixing this changes how carousel records are identified, and automations that fire on records depend on that, so it needs a decision first.
+
+**Tested.** `tests/e2e/cloud.mjs`: a field with four links separated by a comma, a semicolon and a new line (each file deleted, in order, and the link removed from the other record); a field with a link outside the bucket (nothing deleted, the record keeps its links, the history names the link); a real carousel of five slides, two to a group (Carousel 1 deleted with its two files, and no carousel keeps a deleted file).
+
+## Dead image links are caught before they reach Buffer (1.23.0)
+
+**What happened.** Five images of one carousel group were not in the R2 bucket any more (HTTP 404 on both the development address and the custom domain), while the records still linked them. Buffer could not load them, so its post failed with “Please update the media URL to be publicly accessible”. The other images in the same bucket opened on both addresses, so the address was not the cause. The most likely cause is the “Delete a record” step: it deleted the carousel group and its files, and the source records kept their links.
+
+**What changed.**
+- A delete step removes the deleted files’ links from every record that holds them, the same as the retention rule did. No record keeps a link to a file that is gone.
+- Before a Buffer post, every image address is opened. An address that does not open its image stops the step, with the reason, before anything is sent. A dry run reports the same problem.
+- An image uploaded to R2 is opened at its public address before its link is written. If it does not open, the file counts as failed and the record keeps its old link.
+- A link on a Cloudflare development address (`pub-….r2.dev`) is sent with the bucket’s current public address for the same file, when that address opens it. To use this, add the R2 connection again with your custom domain as its public address (connections cannot be edited yet); new uploads use that address too.
+- The R2 settings warn when the public address is a development address.
+
+**Not covered.** Buffer fetches an image again when the post goes out, so an image deleted after the post is made can still fail at that time. Delete after the post is published (see the conditions of each action).
+
+**Tested.** `tests/unit/r2-addresses.test.ts`; `tests/e2e/connect.mjs` (a missing image stops the post before Buffer; a Drive file link is sent as its direct address); `tests/e2e/cloud.mjs` (the mock bucket serves its files, so uploads are read back).
+
+## Each action has its own condition (1.22.0)
+
+Every “Then” action can have an **Only when** condition, like a trigger’s conditions (the same field, operator and value rules, all or any of them). The action runs only for an item that matches it. For an item that does not match, the action is shown as skipped in the history and the actions after it still run. If no action matches an item, the run is shown as skipped. An action with no condition runs for every item, as before.
+
+This lets one automation act on different items at different times: for example, post when the status is “Ready to post”, and delete the R2 files only when the status is “Published”. A status change starts the automation again when the trigger is “When a record changes” on that field, so an action runs once per change and no item is handled twice for the same action.
+
+**Tested.** `tests/unit/step-filter.test.ts` (no condition, and/or, empty values, a website item’s field named like a built-in field) and `tests/e2e/automation-update.mjs` (three records, two actions with different conditions: each action changes only its own records, the skipped actions are shown in the history, and the editor shows “Only when”).
+
+## Google Drive file links go to Buffer (1.21.0)
+
+A Buffer post can now take a Google Drive **file** link. DCE sends it the way the Google Apps Script scheduler does: the link becomes Google’s direct-download address for that file (`https://drive.usercontent.google.com/download?id=…&export=download`). This replaces the 1.18.0 rule that refused every Drive link. The run sends the converted address; the link stored in the record is not changed.
+
+Still refused, with the reason in the run: a Drive **folder** or page (a folder is not one image), a Google Docs page, and a Dropbox share link.
+
+**Not verified against Buffer.** Buffer’s acceptance of the direct address was not tested live, because a test would create a real scheduled post. If Buffer refuses an image, the run fails with Buffer’s message. The file must be shared as “Anyone with the link”; otherwise Google returns a web page. Google may also show a warning page instead of a large file (not tested). Cloudflare R2 remains the reliable choice for Buffer.
+
+**Tested.** `tests/unit/buffer-images.test.ts` (the conversion and the refusals), `tests/e2e/connect.mjs` (a Drive folder is refused before anything is sent; a Drive file link reaches Buffer as the direct address), `tests/e2e/automation-update.mjs` (the warning counts the addresses Buffer cannot read and goes when they are fixed).
+
+## Carousels stay in step with their images (1.20.0)
+
+**Why Buffer still read Google Drive links.** A carousel table keeps its own copy of the image addresses (its *Carousel (image URLs)* field), made from the source table's link field. The copy was refreshed on each change to the source, but when several source rows changed at once (a batch upload to R2), a refresh that started while another was running was dropped, so the copy kept the older Drive links. The Buffer step reads that copy.
+
+**What the app does now.** A refresh that arrives while another runs is not dropped: it runs again afterwards, so the last change is always applied. When the app starts, every carousel table is brought up to date with its source, which corrects copies that an older version left. The warning about Drive or Dropbox links on an automation counts the records as they are now and goes away when the links change, while the page is open. The automation page, the destination panel and the field and new-table dialogs redraw when the records, tables or fields they show change.
+
+**Tested.** `tests/unit/coalesce.test.ts` (3 checks: a request during a run is not lost, a single request runs once, keys do not wait for each other), `tests/e2e/carousel.mjs` (8 checks: a stale link is replaced at start-up) and `tests/e2e/automation-update.mjs` (6 checks: the warning goes while the page is open when a record gets a public picture).
+
+## Uploaded files that are deleted (1.19.0)
+
+**Keep the uploaded files for a set time.** In the Batch Runner and in an automation's *Where the files go* (Cloudflare R2), choose *Keep them until I delete them*, *Delete them after N hours*, or *Delete them at a date and time*. Each file is remembered with the moment it is due.
+
+**The due files are deleted.** While DCE is open (like the automations, which run only then), a due file is deleted from the bucket, and its link is removed from its record. The record stays. A file the bucket refuses is kept in the list, with the reason, and tried again. Only files that DCE uploaded, in the connection's folder, are ever deleted.
+
+**Delete a record.** A new automation action, *Delete a record*, works like *Update a record*: the record that started the automation, or the records where a field has a value. *Also delete the Cloudflare R2 files in this field* deletes each record's files first, then the record. A file that is not in a connected bucket, or that the bucket refuses to delete, stops the step and keeps the record, so no link is left pointing at nothing. A dry run shows what would be deleted.
+
+**Tested.** `tests/e2e/cloud.mjs` (10 checks: a batch that deletes after an hour remembers its files with the time due, a due file is deleted with a signed request and its link removed, an automation deletes a record and its R2 file, and refuses a file outside the bucket), `tests/unit/retention.test.ts` (5 checks: the due time, the key of a public address, a foreign address refused). The DELETE request has been checked against the mock R2, not against a live Cloudflare bucket.
+
+## Buffer images must be public files (1.18.0)
+
+**Why a post failed with “Image could not be read from its URL”.** The links that the Batch Runner writes to Google Drive are Drive share links (`drive.google.com/uc?export=view&id=…`). They give a web page or a redirect, not the image file. Buffer reads each image itself, without a Google sign-in, so it cannot read them. Buffer's guide for hosting media says the address must point straight at a public file, and names Google Drive and Dropbox share links as the addresses that fail.
+
+**What the app does now.** A *Create a post* step refuses a Google Drive or Dropbox address before it calls Buffer, and the run says which address and why. The step shows a warning when records of its table hold such links, and the Batch Runner's Drive destination says so. Nothing is sent, and the run is recorded as failed.
+
+**The fix.** Upload the images to Cloudflare R2 with a public address (Batch Runner → Upload to Cloudflare R2, into the link field the Buffer step uses), then run the automation again. R2 public addresses are direct files, which Buffer can read.
+
+**Tested.** `tests/unit/buffer-images.test.ts` (the checker: Drive and Dropbox refused, a public file accepted) and `tests/e2e/connect.mjs` (18 checks: a Drive link is refused before anything reaches Buffer, a carousel of public links is sent in order).
+
+## Automations: schedules, Instagram, post ids and Update a record (1.16.0)
+
+**A schedule starts from now.** Switching a schedule on, changing its time, days or number of rows, or changing an automation's trigger starts it from that moment: the occurrences that already passed are not run. Before this version, changing the trigger of an enabled automation ran every matching row at once. An automation that has never been armed is armed on its first check and runs from the next occurrence.
+
+**Rows each time** runs the next rows in table order each time the schedule is due. One row a day at the chosen time is *Rows each time: One row*.
+
+**Instagram posts have a type.** When the channel is Instagram, choose Post, Story or Reel; the type is sent with the post, together with `shouldShareToFeed` (true for posts and reels, false for stories), which Buffer requires. The Content pipeline sends feed posts.
+
+**Post id.** *Store the post id in* lists the text, long text and link fields of the table. *Create “Buffer post id”* adds a text field the first time it is used. The id is stored when Buffer accepts the post, so a post that Buffer refuses leaves the field empty.
+
+**Update a record** (formerly *Set a field*). *Which record* is the record that started the automation, or the records where a field has a value (for example, Name is Bravo). *Add another field* sets more fields of the same record. Only the chosen record or records change, never the whole field.
+
+**Tested.** `tests/e2e/automation-update.mjs` (5 checks: a changed schedule does not run what passed, a changed trigger runs nothing, Update a record changes only the record found, the editor's choices), `tests/e2e/order-fields-export.mjs` (10 checks, including a one-row-a-day run through the engine), `tests/e2e/connect.mjs` (17 checks, including the Instagram type and the post id choice), and `tests/unit/buffer-images.test.ts` (6 checks, including the Instagram type in the request). The request to Buffer has not been checked against Buffer's live API.
+
+## Table order, copy, Excel and typed automation values (1.15.0)
+
+**The order of a table is kept.** Each row has a saved place in its table. Rows that were made together, rows from before this version, and rows added later keep their order after a restart and after every change. A new row goes to the end. A row moves up or down from its menu, when no sort, filter or search is on. The carousel slides follow this order. Rows from before this version get a place the first time the app loads, in the order they are shown then. The order that was shown before an earlier restart cannot be recovered, so check the Carousel Plan once and move any slide that is out of place.
+
+**Columns move.** The Fields panel has up and down buttons, and each column's menu has Move left and Move right. Built-in columns move too. The new place is saved, and undo covers it.
+
+**Copy the whole table.** *Copy table* copies every row, or the selected rows when some are selected. Ctrl+C copies the selected rows, also when the focus is on the select-all box.
+
+**Excel.** *Export → Excel file (.xlsx)* saves the rows in table order, with a bold header that stays on screen, numbers as numbers, and dates and date-times as Excel dates.
+
+**Automation values are typed.** A *Set a field* step shows the input of the field's type: a choice list for a select (a value that is not one of its choices stops the step), a date picker, a number, a formula, an image, a template, or text. A value with a `{{field}}` placeholder stays text, filled in when the step runs. An *Add or update a row* value is checked against its column the same way. Link fields are not offered.
+
+**A weekly schedule can run one row at a time.** The *Rows each time* choice is all matching rows at once (as before), one row, or a set number. Each time it is due, it runs the next rows in table order; the others wait for the next time.
+
+**Tested.** `tests/e2e/order-fields-export.mjs` (10 checks: the order after a restart, a row moved from its menu, a value edit and a new row, a column moved, Copy table and Ctrl+C from the select-all box, the Excel file, the typed value, the weekly schedule one row at a time through the engine, a built-in column moved), `tests/unit/order-xlsx.test.ts` (the order rules, the schedule slices, the Excel parts and cells), and the packaged app (`tests/e2e/desktop.mjs`, 10 checks).
+
+## Buffer images and record details (1.14.0)
+
+**Buffer posts take their images by link.** A *Create a post* step has *Image: No image / Send by link*. With *Send by link*, choose the field that holds the image addresses: one public `https://` address, or several separated by commas or new lines (a carousel, up to 10 images). A Google Drive link written by the Batch Runner works. Every address is sent to Buffer as one image of the post, in the order of the field. Addresses that are not public `https://` are left out, and the step says so. The field list offers the fields that can hold text, so a number field such as *Images* is not offered.
+
+**Record details are wider and easier to read.** The drawer is 36% of the window wide (between 440 and 620 pixels). Each field's name is above its input, and the inputs use the normal reading size.
+
+**Tested.** `tests/e2e/connect.mjs` (17 checks, the new one sends a carousel of two links and checks both are in the request, in order), `tests/unit/buffer-images.test.ts` (the link list: separators, Drive links, non-https addresses, the ten-image limit, one asset per image), and the packaged app (`tests/e2e/desktop.mjs`, 9 checks, including the step's choice and the drawer width).
+
+## Data: templates, tables and built-in fields (1.11.x)
+
+**One data table per template.** The editor's Data tab starts with *Records come from*: choose the table first. The bound fields are then the fields of that table, shown as `Label · content.key`. `content.<key>` is the value of the record being rendered, from whichever table it belongs to. The Batch Runner, the editor's data preview, the template list's preview and the thumbnail all use the template's table; the batch screen shows the table, it does not choose another one. Templates made before this choice draw from the Content Plan.
+
+**Built-in fields are editable.** Title, Status, Publish Date and the other built-in fields can be renamed and their choices changed (Edit name and choices, from the column menu or the Fields panel). Their key (used in bindings and storage) and type stay fixed. Each field can also start hidden when its table opens, and can have a *Default for new records and imports* (the Status field defaults to Draft).
+
+**Copy for AI.** The Fields panel copies a field's settings on its row (and its key when you click the key); the field dialog copies the binding key; *Copy table structure (for AI)* copies the table name, record count, Master Field and every field as plain text.
+
+**Renaming and deleting tables.** The Content Plan can be renamed (its name is kept as the setting `table.content.name`) but not deleted. Deleting a custom table moves the templates that drew from it back to the Content Plan. A filter condition on a field the table does not have is removed when the batch changes its table, and the batch says so.
+
+**What stays fixed on purpose:** the internal table id `content` (never shown), the storage keys of the built-in fields (`title`, `status`, …), and the `content.` namespace in templates. Each of these is a stable name that bindings and stored data depend on; everything a person sees (names, choices, defaults, visibility) comes from the table's own settings.
+
 ## Binding syntax & safety
 
 * Text: `{{content.title}}` · filters `|upper |lower |title |trim |slug |truncate:40 |default:N/A |number:2 |date`.
@@ -327,14 +558,24 @@ HTML (self-contained SVG page) · PDF (one per record, or one multi-page file) �
 
 ## Testing
 
+Unit tests: `npm test` (300 tests in 25 files, 1.11.x).
+
 | Suite | Command | Covers |
 |---|---|---|
-| Unit (142) | `npm test` | automations (what each connection allows, the website-event gate, presets, templates and escaping, schedules, OpenAPI operations, migration of the earlier shapes), website connector (placeholders and prompt, checking Gemini's answer, reading events and pages, the HTTP helper's host / redirect / scheme rules), linked / synced fields (both directions, delete, unlink), AES-GCM vault round-trip + tamper detection, automation timing / trigger semantics / GraphQL escaping, safe expressions & injection attempts, **content pipeline** (sitemap / RSS / HTML parsing, guardrail rules, write → check → rewrite loop with fake models, schedule / retry rules, never-twice selection, robots.txt matching, private-address blocking, 1 request/second throttling against a local server), bindings, text fitting, `.njs` round-trip / validation / migration, scene resolution, SVG/PDF structure, CSV parser, filter operators, importer, document model (group, reorder, align, DnD) |
+| Unit (314) | `npm test` | automations (what each connection allows, the website-event gate, presets, templates and escaping, schedules, OpenAPI operations, migration of the earlier shapes), website connector (placeholders and prompt, checking Gemini's answer, reading events and pages, the HTTP helper's host / redirect / scheme rules), linked / synced fields (both directions, delete, unlink), AES-GCM vault round-trip + tamper detection, automation timing / trigger semantics / GraphQL escaping, safe expressions & injection attempts, **content pipeline** (sitemap / RSS / HTML parsing, guardrail rules, write → check → rewrite loop with fake models, schedule / retry rules, never-twice selection, robots.txt matching, private-address blocking, 1 request/second throttling against a local server), bindings, text fitting, `.njs` round-trip / validation / migration, scene resolution, SVG/PDF structure, CSV parser, filter operators, importer, document model (group, reorder, align, DnD) |
 | Editor e2e (30) | `npm run build && node tests/e2e/editor.mjs` | real mouse/keyboard: draw every tool, type into text, bind fields, constraints, undo/redo, snapping, layers (hide, lock, rename, DnD), group/ungroup, copy/paste, pen, zoom, data preview, save → reload → persisted |
 | Data + batch e2e (30) | `node tests/e2e/batch.mjs` | CSV import with bad rows, inline edit, filter builder, bulk update, CSV/JSON export + re-import, malformed CSV, custom field, sanitised Markdown, asset upload/delete, `.njs` export → import identical, single PNG, JPEG/SVG/HTML/PDF (single + multi-page), 100-record ZIP, pause/resume/cancel, failed-record inspect → fix → retry, missing values, Python bundle actually executed, sample-data removal, WOFF2 font import, revert-to-saved, offline reload |
-| Tables / connections / automations e2e (16) | `node tests/e2e/connect.mjs` | starts a **mock Buffer API** and the **real relay**: relay CORS / auth rules, encrypted-at-rest keys (checked in IndexedDB), reveal / copy / replace menu, account picker, channel discovery, custom table + every field type, two-sided links, synced fields in both directions, delete-with-dependents, automation payload / schedule / status update / no duplicates, failure + back-off, safe enabling, pause, persistence after reload |
+| Tables / connections / automations e2e (17) |
+| Automation updates e2e (5) | `node tests/e2e/automation-update.mjs` | a changed schedule starts from now; a changed trigger runs nothing; Update a record changes only the record found by a value; the editor's record and field choices |
+| Order, fields, copy, Excel and typed automation values e2e (10) | `node tests/e2e/order-fields-export.mjs` | rows keep their order through a restart; a row and a column move from their menus; Copy table; the Excel file opens with its header, order and numbers; a set-field value is a choice list; a weekly schedule runs one row each time | `node tests/e2e/connect.mjs` | starts a **mock Buffer API** and the **real relay**: relay CORS / auth rules, encrypted-at-rest keys (checked in IndexedDB), reveal / copy / replace menu, account picker, channel discovery, custom table + every field type, two-sided links, synced fields in both directions, delete-with-dependents, automation payload / schedule / status update / no duplicates, failure + back-off, safe enabling, pause, persistence after reload |
 | Content pipeline e2e (26) | `node tests/e2e/pipeline.mjs` | mock website (sitemap, robots.txt, thin / disallowed / overreaching pages), **mock Gemini**, **mock Buffer**, the **real relay**: seeded sources can be deleted and a new one added, encrypted Gemini key, wrong key → clear alert and nothing sent, a robots-disallowed page is never requested and requests are ≥ 1 s apart, thin page / fact-check failure / banned wording are rejected and the next page is used, quota error retried, simulation never calls Buffer, approval holds until Approve, an edit that breaks a rule cannot be sent, reject, auto-publish with fixed time, expired Buffer token, simulation-only source, site down, "nothing new", daily schedule runs once, exports contain no secrets, model list / retired-model alert / Auto fix, live run log and Stop (leave the page and come back), channel list from Buffer (new channels saved, removed ones flagged, ids encrypted), sync to a table (one row per post, no duplicates) |
 | Website connector e2e (7) | `node tests/e2e/website.mjs` | mock website (connector API, article page), **mock Gemini**, the **real relay** and the real app: connection + permissions test, preset workflow, article event → post, row, Gemini fill, sync, render, a second check repeats nothing, run log with each step |
+| Formulas & table undo e2e (13) | `node tests/e2e/table-formulas.mjs` | formula field from the Calculated group, typing a formula in a formula, currency and number cells, the large formula editor (live result, syntax check, Insert, Ctrl+Enter), nested results, Ctrl+Z / Ctrl+Y over field, cell and row changes, no console errors |
+| Dynamic data e2e (10) | `node tests/e2e/dynamic-data.mjs` | a template chooses its data table, then the field of that table; the batch and the preview use that table; a built-in field is renamed (its key and type stay); fields and table structure are copied for an AI prompt; the Content Plan is renamed (not deleted); deleting a table re-points its templates |
+| Template download e2e (5) | `node tests/e2e/template-export.mjs` | the card's and the editor's Download menu: the .njs design file, PNG, JPEG, PDF, SVG and HTML at the template's size, named after it; unsaved changes included |
+| Ruler guides e2e (6) | `node tests/e2e/ruler-guides.mjs` | guides pulled from the rulers; an element stops on a guide (not on the grid); the magnet off; a guide dragged back onto its ruler is removed; guides are not saved |
+| Cloud destinations e2e (7) | `node tests/e2e/cloud.mjs` | mock R2 and mock Google Drive: the Batch Runner's uploads and links, the Drive folder replace, and an automation render that uploads every record |
+| Assets folder import e2e (4) | `node tests/e2e/assets-folder.mjs` | Browse folder: drawings and pictures go into a folder named after it, other files skipped, a second import adds nothing, the pack line has no description |
 | Benchmarks | `npm run bench` | see below |
 
 ## Measured performance
@@ -388,7 +629,7 @@ Memory: finished ZIP chunks are folded into Blobs, so the main-thread JS heap st
 * **Google Fonts** download needs network once (offline afterwards); it could not be exercised offline in tests.
 * **Streaming to disk** needs a Chromium browser with the File System Access API and a user gesture; otherwise the ZIP is
   assembled in (Blob-backed) memory. Very large jobs (> ~2 GB) should use the option or the external bundle.
-* The **Batch Runner renders from the Content Plan only**; custom tables feed automations, filters and exports but not (yet) template rendering. The CSV/JSON *import wizard* is Content-Plan-only — for custom tables paste from a spreadsheet.
+* Every template draws its records from **one table** (its data table, chosen in the editor’s Data tab). A binding cannot reach into a second table through a link yet (no lookup fields). The CSV/JSON *import wizard* is Content-Plan-only — for custom tables paste from a spreadsheet.
 * **Formula and rollup/count fields** are not implemented (synced fields cover mirroring); a link mirrors the first linked record.
 * **Automations only run while DCE is open** in a browser tab (and catch up when it is opened). Unattended 24/7 scheduling would need a server. Buffer (publishing) and Gemini (writing) are built in; other services would be new action types.
 * The Buffer GraphQL schema was taken from Buffer's public docs (`createPost`, `account.organizations`, `channels`); it was exercised against a mock of that schema, **not against a live Buffer account** — use *Test connection* and a *dry run* first.

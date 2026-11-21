@@ -1,21 +1,31 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useId, useMemo, useState } from 'react';
 import { useLiveQuery } from 'dexie-react-hooks';
 import { ArrowDown, ArrowUp, CalendarClock, FlaskConical, Pause, Play, Plus, Send, Trash2, Zap } from 'lucide-react';
 import { runAutomation, type RunReport } from '../automation/engine';
 import {
-  automationProblems, CONTENT, channelLabelOf, FORMATS, isWebsite, METHODS, newStep, PRESET_LABEL, presetAutomation, RUN_STATUS_CHIP,
+  automationProblems, bufferImageProblem, BUFFER_MAX_IMAGES, CONTENT, imageLinksOf, channelLabelOf, FORMATS, isWebsite, METHODS, newStep, PRESET_LABEL, presetAutomation, RUN_STATUS_CHIP,
   stepChoices, stepProblems, stepSummary, STEP_LABEL, triggerChoices, triggerSummary, type Names, type PresetId,
 } from '../automation/model';
 import { channelProps } from '../db/connections';
+import { getValue } from '../db/fields';
 import { armedLastDue, choiceKey, dateKey, signatureOf, triggerFromValue } from '../automation/triggers';
-import { applyFilter, type FilterGroup } from '../db/filter';
+import { applyFilter, emptyFilter, type FilterGroup } from '../db/filter';
 import { db, getSetting, setSetting, type AutoMethod, type AutomationRow, type AutoRunRow, type AutoStep, type AutoTrigger, type ConnectionRow, type FieldDef, type TemplateRow, type WorkflowTrigger } from '../db/schema';
 import { allTables, createTable, fieldsOf, recordsOf, tableName } from '../db/tables';
 import { parsePlaceholders } from '../connector/fill';
 import { EVENT_TYPE_TEXT } from '../connector/events';
 import { Dialog, Empty, fmtDate, IconBtn } from '../ui/kit';
 import { FilterBuilder } from '../ui/FilterBuilder';
-import { confirmAction, notify } from '../ui/store';
+import { DestinationPanel } from './batch/DestinationPanel';
+import { FieldValueInput } from '../ui/FieldValueInput';
+import { sweepUploads } from '../cloud/retention';
+
+// test hook (used by the e2e suite): runs an automation at a chosen time, as the schedule would
+(window as unknown as { __dceRunAutomation?: typeof runAutomation }).__dceRunAutomation = runAutomation;
+(window as unknown as { __dceSweepUploads?: typeof sweepUploads }).__dceSweepUploads = sweepUploads;
+import { DEFAULT_DEST } from '../batch/destination';
+import { confirmAction, notify, useStore } from '../ui/store';
+import { recordsStore, tablesStore } from '../db/stores';
 import { uid } from '../engine/njs';
 
 /** The fields a website event carries, for the "insert a field" menus. Any other text can still be typed. */
@@ -28,9 +38,36 @@ const EVENT_KEYS: Record<WorkflowTrigger, string[]> = {
 const statusChip = (s: AutoRunRow['status']) => <span className={`chip ${RUN_STATUS_CHIP[s].cls}`}>{RUN_STATUS_CHIP[s].text}</span>;
 
 /** The fields an item of this trigger has, for "insert a field". */
-function itemFields(t: AutoTrigger): { key: string; label: string }[] {
-  if (t.kind !== 'event') return fieldsOf(t.table).map((f: FieldDef) => ({ key: f.key, label: f.label }));
-  return EVENT_KEYS[t.event].map((k) => ({ key: k, label: k }));
+function itemFields(t: AutoTrigger): { key: string; label: string; type?: string }[] {
+  if (t.kind !== 'event') return fieldsOf(t.table).map((f: FieldDef) => ({ key: f.key, label: f.label, type: f.type }));
+  return EVENT_KEYS[t.event].map((k) => ({ key: k, label: k, type: 'text' }));
+}
+
+/**
+ * Where a Buffer post's image comes from: no image, or a field that holds public https:// addresses (one, or several for a
+ * carousel, separated by commas). The field is chosen from the fields that can hold text.
+ */
+function ImageSource({ value, fields, onChange }: { value: string | undefined; fields: { key: string; label: string; type?: string }[]; onChange: (v: string | undefined) => void }) {
+  const group = useId(); // this step's radio buttons only
+  const linked = value !== undefined;
+  const candidates = fields.filter((f) => !f.type || ['url', 'text', 'longtext'].includes(f.type));
+  const shown = value && !candidates.some((f) => f.key === value) ? [...candidates, { key: value, label: value }] : candidates;
+  return (
+    <div role="radiogroup" aria-label="Image" style={{ display: 'flex', flexDirection: 'column', gap: 6, fontSize: 12, color: 'var(--muted)' }}>
+      <span style={{ fontWeight: 500 }}>Image</span>
+      <div className="row" style={{ gap: 18 }}>
+        <label className="chk"><input type="radio" name={group} checked={!linked} onChange={() => onChange(undefined)} /> No image</label>
+        <label className="chk"><input type="radio" name={group} checked={linked} onChange={() => onChange(value ?? '')} /> Send by link</label>
+      </div>
+      {linked && (
+        <select aria-label="Link field" value={value} onChange={(e) => onChange(e.target.value)}>
+          <option value="">— choose the field with the links —</option>
+          {shown.map((f) => <option key={f.key} value={f.key}>{f.label}</option>)}
+        </select>
+      )}
+      {linked && <div className="small muted">The field holds one public https:// address, or several separated by commas or new lines (a carousel). Up to {BUFFER_MAX_IMAGES} images. A Google Drive file link works when the file is shared as “Anyone with the link”.</div>}
+    </div>
+  );
 }
 
 
@@ -52,7 +89,7 @@ const TRIGGER_TEXT: Record<string, string> = {
   created: 'Each new record starts the actions once. Records that already exist when you turn this on are not run unless you choose so.',
   changed: 'The actions run each time the watched field gets a different value (for a record that matches the conditions).',
   once: 'At that time, the actions run for every matching record that has not run yet.',
-  weekly: 'On those days at that time, the actions run for every matching record that has not run yet. Turning it on does not run occurrences that already passed.',
+  weekly: 'On those days at that time, the actions run for the matching rows that have not run yet: all of them at once, or the number chosen under “Rows each time”, in table order. Turning it on does not run occurrences that already passed.',
 };
 
 function TriggerCard({ a, conns, names, save }: { a: AutomationRow; conns: ConnectionRow[]; names: Names; save: (p: Partial<AutomationRow>) => void }) {
@@ -114,6 +151,26 @@ function TriggerCard({ a, conns, names, save }: { a: AutomationRow; conns: Conne
                 <label className="fld"><span>Time</span>
                   <input type="time" aria-label="Run time" value={weekly.time} onChange={(e) => save({ trigger: { ...t, when: { mode: 'weekly', time: e.target.value, days: weekly.days } } as AutoTrigger, fired: {} })} />
                 </label>
+                <div className="col" style={{ gap: 4 }}>
+                  <span style={{ fontSize: 12, color: 'var(--muted)', fontWeight: 500 }}>Rows each time</span>
+                  <div className="row" style={{ gap: 8 }}>
+                    <select aria-label="Rows each time" value={weekly.perTime === undefined ? 'all' : weekly.perTime === 1 ? 'one' : 'n'} onChange={(e) => {
+                      const v = e.target.value;
+                      const perTime = v === 'all' ? undefined : v === 'one' ? 1 : (weekly.perTime && weekly.perTime > 1 ? weekly.perTime : 2);
+                      save({ trigger: { ...t, when: { mode: 'weekly', time: weekly.time, days: weekly.days, perTime } } as AutoTrigger, fired: {} });
+                    }}>
+                      <option value="all">All matching rows at once</option>
+                      <option value="one">One row (the next one in the table)</option>
+                      <option value="n">A set number of rows</option>
+                    </select>
+                    {weekly.perTime !== undefined && weekly.perTime !== 1 && (
+                      <input type="number" min={1} max={500} aria-label="Number of rows" value={weekly.perTime} style={{ width: 80 }} onChange={(e) => {
+                        const perTime = Math.max(1, Math.min(500, Math.round(Number(e.target.value) || 1)));
+                        save({ trigger: { ...t, when: { mode: 'weekly', time: weekly.time, days: weekly.days, perTime } } as AutoTrigger, fired: {} });
+                      }} />
+                    )}
+                  </div>
+                </div>
                 <div className="fld"><span>Days</span>
                   <div className="row wrap">
                     {DAY_SHORT.map((d, i) => (
@@ -190,6 +247,12 @@ function StepCard({ a, index, conns, templates, names, save }: {
         <IconBtn icon={<Trash2 size={13} />} label={`Remove action ${index + 1}`} onClick={remove} />
       </div>
       <div className="panel-body col" style={{ gap: 8 }}>
+        {a.trigger.kind !== 'event' && (
+          <div className="col" style={{ gap: 4 }}>
+            <span className="small muted">Only when (empty: this action runs for every item)</span>
+            <FilterBuilder value={(step.filter ?? emptyFilter()) as FilterGroup} onChange={(g) => put({ ...step, filter: g })} fields={fieldsOf(a.trigger.table)} />
+          </div>
+        )}
         <div className="small"><b>{STEP_LABEL[step.kind]}</b> — {stepSummary(step, names)}</div>
         {problems.length > 0 && <div className="callout warn">{problems.map((p, i) => <div key={i}>⚠ {p}</div>)}</div>}
         <StepForm step={step} index={index} a={a} conns={conns} templates={templates} onChange={put} />
@@ -226,14 +289,53 @@ function InsertField({ fields, onInsert }: { fields: { key: string; label: strin
   );
 }
 
+/** The warning about image links Buffer cannot read. It counts the records as they are now, so it follows every change. */
+function ImageLinkWarning({ table, field }: { table: string; field: string }) {
+  useStore(recordsStore, (s) => s.records);
+  useStore(tablesStore, (s) => s.rows);
+  const count = recordsOf(table).filter((r) => imageLinksOf(getValue(r, field)).links.some((l) => bufferImageProblem(l) !== null)).length;
+  if (count === 0) return null;
+  return (
+    <div className="callout warn">{count} record{count === 1 ? '' : 's'} in this table {count === 1 ? 'has' : 'have'} an image address Buffer cannot read in this field: a Dropbox link, or a Google Drive folder or page rather than one image file. The post would fail. Use a direct image file link, or upload the images to Cloudflare R2 (Batch Runner → Upload to Cloudflare R2) and choose that link field.</div>
+  );
+}
+
+/** “Which record”: the record that started the automation, or the records where a field has a value. */
+function RecordChoice({ index, table, match, onChange }: { index: number; table: string; match: { field: string; value: string } | undefined; onChange: (m: { field: string; value: string } | undefined) => void }) {
+  const all = table ? fieldsOf(table) : [];
+  const matchField = match ? all.find((f) => f.key === match.field) : undefined;
+  const name = `which-record-${index}`;
+  return (
+    <div className="col" role="radiogroup" aria-label="Which record" style={{ gap: 6 }}>
+      <span style={{ fontSize: 12, color: 'var(--muted)', fontWeight: 500 }}>Which record</span>
+      <label className="chk"><input type="radio" name={name} checked={!match} onChange={() => onChange(undefined)} /> The record that started this automation</label>
+      <label className="chk"><input type="radio" name={name} checked={!!match} onChange={() => onChange(match ?? { field: '', value: '' })} /> The record where a field has a value</label>
+      {match && (
+        <div className="row wrap" style={{ gap: 8, alignItems: 'flex-end' }}>
+          <label className="fld" style={{ minWidth: 200 }}><span>Find the record by</span>
+            <select aria-label="Record field" value={match.field} onChange={(e) => onChange({ field: e.target.value, value: '' })}>
+              <option value="">— choose —</option>{all.map((f) => <option key={f.key} value={f.key}>{f.label}</option>)}
+            </select>
+          </label>
+          <div className="col" style={{ gap: 4, minWidth: 260, flex: 1 }}>
+            <span style={{ fontSize: 12, color: 'var(--muted)', fontWeight: 500 }}>is</span>
+            {matchField
+              ? <FieldValueInput field={matchField} value={match.value} label="Record value" onChange={(v) => onChange({ field: match.field, value: v })} />
+              : <input aria-label="Record value" value="" disabled placeholder="Choose the field first" />}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 function StepForm({ step, index, a, conns, templates, onChange }: { step: AutoStep; index: number; a: AutomationRow; conns: ConnectionRow[]; templates: TemplateRow[]; onChange: (s: AutoStep) => void }) {
   const fields = itemFields(a.trigger);
   switch (step.kind) {
     case 'buffer_post': {
       const conn = conns.find((c) => c.id === step.connectionId);
       const channels = conn ? channelProps(conn) : [];
-      const homeFields = a.trigger.kind === 'record' ? fieldsOf(a.trigger.table) : [];
-      const urlFields = fields.filter((f) => ['url', 'image', 'imageUrl'].includes(f.key) || /url|image/i.test(f.key));
+      const homeFields = a.trigger.kind !== 'event' ? fieldsOf(a.trigger.table) : [];
       const timing = step.timing;
       const setTiming = (p: Partial<typeof timing>) => onChange({ ...step, timing: { ...timing, ...p } });
       return (
@@ -245,13 +347,19 @@ function StepForm({ step, index, a, conns, templates, onChange }: { step: AutoSt
                 {channels.map((p) => <option key={p.id} value={p.key}>{channelLabelOf(p.key)} ({p.key})</option>)}
               </select>
             </label>
-            <label className="fld"><span>Image field (a public https:// address)</span>
-              <select aria-label="Image field" value={step.imageField ?? ''} onChange={(e) => onChange({ ...step, imageField: e.target.value || undefined })}>
-                <option value="">No image</option>
-                {urlFields.map((f) => <option key={f.key} value={f.key}>{f.label}</option>)}
-              </select>
-            </label>
+            <ImageSource value={step.imageField} fields={fields} onChange={(v) => onChange({ ...step, imageField: v })} />
+            {step.imageField && a.trigger.kind !== 'event' && <ImageLinkWarning table={a.trigger.table} field={step.imageField} />}
           </div>
+          {/INSTAGRAM/i.test(step.channel) && (
+            <label className="fld" style={{ maxWidth: 260 }}><span>Instagram post type</span>
+              <select aria-label="Instagram post type" value={step.instagramType ?? 'post'} onChange={(e) => onChange({ ...step, instagramType: e.target.value as 'post' | 'story' | 'reel' })}>
+                <option value="post">Post (feed)</option>
+                <option value="story">Story</option>
+                <option value="reel">Reel</option>
+              </select>
+              <div className="small muted">Buffer needs the type of every Instagram post.</div>
+            </label>
+          )}
           <label className="fld"><span>Post text — use fields as {'{{title}}'}</span>
             <textarea rows={4} aria-label="Post text" value={step.text} onChange={(e) => onChange({ ...step, text: e.target.value })} />
           </label>
@@ -282,7 +390,8 @@ function StepForm({ step, index, a, conns, templates, onChange }: { step: AutoSt
           <label className="fld" style={{ maxWidth: 360 }}><span>Store the post id in (this item's row)</span>
             <select aria-label="Post id field" value={step.resultField ?? ''} onChange={(e) => onChange({ ...step, resultField: e.target.value || undefined })}>
               <option value="">— nowhere —</option>
-              {homeFields.filter((f) => ['text', 'longtext'].includes(f.type) && !f.builtin).map((f) => <option key={f.key} value={f.key}>{f.label}</option>)}
+              {homeFields.filter((f) => ['text', 'longtext', 'url'].includes(f.type) && !f.readonly).map((f) => <option key={f.key} value={f.key}>{f.label}</option>)}
+              <option value="__create__">Create “Buffer post id” (a text field)</option>
             </select>
           </label>
         </>
@@ -383,21 +492,82 @@ function StepForm({ step, index, a, conns, templates, onChange }: { step: AutoSt
       );
     }
     case 'set_field': {
-      const cols = step.table ? fieldsOf(step.table).filter((f) => !f.readonly && !f.sync) : [];
+      // an Airtable-style “Update a record”: the record (this one, or the one where a field has a value), and the fields to set
+      // a link field is changed in its table (its values are records): it is not offered here
+      const all = step.table ? fieldsOf(step.table) : [];
+      const cols = all.filter((f) => !f.readonly && !f.sync && f.type !== 'link');
+      const changes = [{ field: step.field, value: step.value }, ...(step.also ?? [])];
+      const update = (i: number, p: { field?: string; value?: string }) => {
+        if (i === 0) return onChange({ ...step, field: p.field ?? step.field, value: p.value ?? step.value });
+        onChange({ ...step, also: (step.also ?? []).map((c, k) => (k === i - 1 ? { ...c, ...p } : c)) });
+      };
+      const matchField = step.match ? all.find((f) => f.key === step.match!.field) : undefined;
+      const label = (sub: string) => <span style={{ fontSize: 12, color: 'var(--muted)', fontWeight: 500 }}>{sub}</span>;
       return (
         <>
-          <div className="grid2">
-            <TableSelect label="Table" value={step.table} onChange={(v) => onChange({ ...step, table: v, field: '' })} />
-            <label className="fld"><span>Field</span>
-              <select aria-label="Field" value={step.field} onChange={(e) => onChange({ ...step, field: e.target.value })}>
-                <option value="">— choose —</option>{cols.map((f) => <option key={f.key} value={f.key}>{f.label}</option>)}
-              </select>
-            </label>
+          <TableSelect label="Table" value={step.table} onChange={(v) => onChange({ ...step, table: v, field: '', match: undefined, also: [] })} />
+          <div className="col" role="radiogroup" aria-label="Which record" style={{ gap: 6 }}>
+            {label('Which record')}
+            <label className="chk"><input type="radio" name={`which-record-${index}`} checked={!step.match} onChange={() => onChange({ ...step, match: undefined })} /> The record that started this automation</label>
+            <label className="chk"><input type="radio" name={`which-record-${index}`} checked={!!step.match} onChange={() => onChange({ ...step, match: step.match ?? { field: '', value: '' } })} /> The record where a field has a value</label>
+            {step.match && (
+              <div className="row wrap" style={{ gap: 8, alignItems: 'flex-end' }}>
+                <label className="fld" style={{ minWidth: 200 }}><span>Find the record by</span>
+                  <select aria-label="Record field" value={step.match.field} onChange={(e) => onChange({ ...step, match: { field: e.target.value, value: '' } })}>
+                    <option value="">— choose —</option>{all.map((f) => <option key={f.key} value={f.key}>{f.label}</option>)}
+                  </select>
+                </label>
+                <div className="col" style={{ gap: 4, minWidth: 260, flex: 1 }}>
+                  {label('is')}
+                  {matchField
+                    ? <FieldValueInput field={matchField} value={step.match.value} label="Record value" onChange={(v) => onChange({ ...step, match: { field: step.match!.field, value: v } })} />
+                    : <input aria-label="Record value" value="" disabled placeholder="Choose the field first" />}
+                </div>
+              </div>
+            )}
           </div>
-          <label className="fld" style={{ maxWidth: 420 }}><span>Set it to</span>
-            <input aria-label="Value" value={step.value} onChange={(e) => onChange({ ...step, value: e.target.value })} placeholder="e.g. Posted" />
-          </label>
+          <div className="col" style={{ gap: 6 }}>
+            {label('Fields to update')}
+            {changes.map((c, i) => {
+              const f = cols.find((x) => x.key === c.field);
+              const valueLabel = i === 0 ? 'Value' : `Value ${i + 1}`;
+              return (
+                <div key={i} className="row wrap" style={{ gap: 8, alignItems: 'flex-end' }}>
+                  <label className="fld" style={{ minWidth: 200 }}><span>Field</span>
+                    <select aria-label={i === 0 ? 'Field' : `Field ${i + 1}`} value={c.field} onChange={(e) => update(i, { field: e.target.value, value: '' })}>
+                      <option value="">— choose —</option>{cols.map((x) => <option key={x.key} value={x.key}>{x.label}</option>)}
+                    </select>
+                  </label>
+                  <div className="col" style={{ gap: 4, minWidth: 260, flex: 1 }}>
+                    {label('Set it to')}
+                    {f
+                      ? <FieldValueInput field={f} value={c.value} label={valueLabel} onChange={(v) => update(i, { value: v })} />
+                      : <input aria-label={valueLabel} value="" disabled placeholder="Choose the field first" />}
+                  </div>
+                  {i > 0 && <IconBtn icon={<Trash2 size={13} />} label={`Remove field ${i + 1}`} onClick={() => onChange({ ...step, also: (step.also ?? []).filter((_, k) => k !== i - 1) })} />}
+                </div>
+              );
+            })}
+            <button className="btn sm" style={{ alignSelf: 'flex-start' }} onClick={() => onChange({ ...step, also: [...(step.also ?? []), { field: '', value: '' }] })}><Plus size={14} /> Add another field</button>
+          </div>
           {step.table && a.trigger.kind === 'event' && <div className="small muted">The row is the one of this item in that table (add it with an “Add or update a row” action first).</div>}
+        </>
+      );
+    }
+    case 'delete_record': {
+      const all = step.table ? fieldsOf(step.table) : [];
+      const fileFields = all.filter((f) => ['url', 'text', 'longtext'].includes(f.type));
+      return (
+        <>
+          <TableSelect label="Table" value={step.table} onChange={(v) => onChange({ ...step, table: v, match: undefined, fileField: undefined })} />
+          <RecordChoice index={index} table={step.table} match={step.match} onChange={(m) => onChange({ ...step, match: m })} />
+          <label className="fld" style={{ maxWidth: 420 }}><span>Also delete the Cloudflare R2 files in this field</span>
+            <select aria-label="File field" value={step.fileField ?? ''} onChange={(e) => onChange({ ...step, fileField: e.target.value || undefined })}>
+              <option value="">— none: the files are kept —</option>{fileFields.map((f) => <option key={f.key} value={f.key}>{f.label}</option>)}
+              {step.fileField && !fileFields.some((f) => f.key === step.fileField) && <option value={step.fileField}>{step.fileField} (not a field of this table)</option>}
+            </select>
+          </label>
+          <div className="callout warn">Deleting is permanent. The record is removed from the table, and with a file field its files are deleted from the Cloudflare R2 bucket too. Only files of a connected R2 bucket are deleted, and a record is kept when its file cannot be deleted.</div>
         </>
       );
     }
@@ -430,19 +600,22 @@ function StepForm({ step, index, a, conns, templates, onChange }: { step: AutoSt
       return <TableSelect label="Table" value={step.table} onChange={(v) => onChange({ ...step, table: v })} />;
     case 'render':
       return (
-        <div className="grid2">
-          <TableSelect label="Table" value={step.table} onChange={(v) => onChange({ ...step, table: v })} />
-          <label className="fld"><span>Template</span>
-            <select aria-label="Template" value={step.templateId} onChange={(e) => onChange({ ...step, templateId: e.target.value })}>
-              <option value="">— choose —</option>{templates.map((t) => <option key={t.id} value={t.id}>{t.name}</option>)}
-            </select>
-          </label>
-          <label className="fld" style={{ maxWidth: 200 }}><span>Format</span>
-            <select aria-label="Format" value={step.format} onChange={(e) => onChange({ ...step, format: e.target.value as typeof step.format })}>
-              {FORMATS.map((f) => <option key={f} value={f}>{f.toUpperCase()}</option>)}
-            </select>
-          </label>
-        </div>
+        <>
+          <div className="grid2">
+            <TableSelect label="Table" value={step.table} onChange={(v) => onChange({ ...step, table: v })} />
+            <label className="fld"><span>Template</span>
+              <select aria-label="Template" value={step.templateId} onChange={(e) => onChange({ ...step, templateId: e.target.value })}>
+                <option value="">— choose —</option>{templates.map((t) => <option key={t.id} value={t.id}>{t.name}</option>)}
+              </select>
+            </label>
+            <label className="fld" style={{ maxWidth: 200 }}><span>Format</span>
+              <select aria-label="Format" value={step.format} onChange={(e) => onChange({ ...step, format: e.target.value as typeof step.format })}>
+                {FORMATS.map((f) => <option key={f} value={f}>{f.toUpperCase()}</option>)}
+              </select>
+            </label>
+          </div>
+          <DestinationPanel bare heading="Where the files go" value={step.dest ?? DEFAULT_DEST} batchTable={step.table} onChange={(d) => onChange({ ...step, dest: d })} />
+        </>
       );
   }
 }
@@ -483,7 +656,14 @@ function Editor({ a, conns, templates }: { a: AutomationRow; conns: ConnectionRo
   const [report, setReport] = useState<RunReport | null>(null);
   const [busy, setBusy] = useState(false);
   const [dlg, setDlg] = useState<number | null>(null);
-  const save = (patch: Partial<AutomationRow>) => db.automations.update(a.id, { ...patch, updated_at: Date.now() });
+  // a schedule that is new or has a different time, days or count starts from now: the occurrences that passed are not run
+  const save = (patch: Partial<AutomationRow>) => {
+    let next = patch;
+    if (patch.trigger?.kind === 'schedule' && JSON.stringify(a.trigger.kind === 'schedule' ? a.trigger.when : null) !== JSON.stringify(patch.trigger.when)) {
+      next = { ...patch, trigger: { ...patch.trigger, lastDue: armedLastDue(patch.trigger.when, Date.now()) } };
+    }
+    return db.automations.update(a.id, { ...next, updated_at: Date.now() });
+  };
   const problems = automationProblems(a);
   const matching = a.trigger.kind !== 'event' ? applyFilter(recordsOf(a.trigger.table), a.trigger.filter as FilterGroup) : [];
 
@@ -611,7 +791,11 @@ function NewDialog({ conns, templates, onClose, onCreated }: { conns: Connection
   const [busy, setBusy] = useState(false);
   const usesTemplate = preset === 'article' || preset === 'product-reviewed' || preset === 'product-published';
   const website = conns.find(isWebsite);
-  const buffer = conns.find((c) => c.provider === 'buffer');
+  // the Buffer account a preset uses: the active one when it has channels, else the first with channels, else the first
+  const [activeBuffer, setActiveBuffer] = useState('');
+  useEffect(() => { void getSetting<string>('connections.active.buffer', '').then(setActiveBuffer); }, []);
+  const buffers = conns.filter((c) => c.provider === 'buffer');
+  const buffer = buffers.find((c) => c.id === activeBuffer && channelProps(c).length > 0) ?? buffers.find((c) => channelProps(c).length > 0) ?? buffers[0];
   const gemini = conns.find((c) => c.provider === 'gemini');
   // the synced posts table of the Content pipeline ('' = none yet); null while it is read
   const [postsTable, setPostsTable] = useState<string | null>(null);
@@ -676,6 +860,12 @@ function NewDialog({ conns, templates, onClose, onCreated }: { conns: Connection
 const firstChannelOf = (c: ConnectionRow | undefined): string => (c ? channelProps(c)[0]?.key ?? '' : '');
 
 export default function AutomationsPage() {
+  // the page is drawn again whenever the data it shows changes: records, tables and their fields
+  useStore(recordsStore, (s) => s.records);
+  useStore(recordsStore, (s) => s.fields);
+  useStore(tablesStore, (s) => s.tables);
+  useStore(tablesStore, (s) => s.rows);
+  useStore(tablesStore, (s) => s.fields);
   const autos = useLiveQuery(async () => (await db.automations.toArray()).sort((x, y) => x.created_at - y.created_at), [], undefined);
   // undefined until the database has answered: a preset must never be built from a list that has not loaded yet
   const conns = useLiveQuery(() => db.connections.toArray(), [], undefined as ConnectionRow[] | undefined);

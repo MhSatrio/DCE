@@ -7,8 +7,9 @@ import { recordsStore, tablesStore } from '../db/stores';
 import { uid } from '../engine/njs';
 import { pageOf, rowIdOf, type ConnectorEvent } from '../connector/events';
 import { flattenPayload, STEP_LABEL, ruleToAutomation, workflowRunToLog, workflowToAutomation } from './model';
-import { scheduleFor, StopItem, runStep, type Cur, type Timing } from './steps';
-import { dueNow, signatureOf } from './triggers';
+import { actionRuns, scheduleFor, StopItem, runStep, type Cur, type Timing } from './steps';
+import { armedLastDue, dueNow, signatureOf, takeForOccurrence } from './triggers';
+import { sweepUploads } from '../cloud/retention';
 
 export { resolveBufferCredentials, activeConnectionId, UNIT_MS } from './steps';
 
@@ -28,7 +29,7 @@ type FiredState = Fired[string];
 
 /** Values a template can use: `{{title}}` and `{{content.title}}` both work, in every table. */
 export function valuesOf(rec: ContentRecord, table: string): Record<string, unknown> {
-  return isContent(table) ? recordContent(rec) : { ...rec.data, id: rec.id, title: rowName(rec, table) };
+  return recordContent(rec, table);
 }
 
 /** When should Buffer publish, for a record? (kept for the rule tests: the field's value is read from the record.) */
@@ -96,12 +97,22 @@ export async function runSteps(a: AutomationRow, cur: Cur, o: { dry: boolean; no
   const from = o.from ?? 0;
   for (let i = 0; i < from && i < steps.length; i++) { steps[i].status = 'ok'; steps[i].detail = 'Done on an earlier attempt.'; }
   let failedAt = -1;
+  let stopAt = -1;
   let stopped = '';
   let postId: string | undefined;
   let dueAt: string | undefined;
+  let notMatched = 0;
   for (let i = from; i < a.steps.length; i++) {
     steps[i].status = 'running';
     await o.onStep?.(steps);
+    // the action's own condition: an item that does not match it is not acted on, and the actions after it still run
+    if (!actionRuns(a.steps[i].filter, cur)) {
+      steps[i].status = 'skipped';
+      steps[i].detail = 'Not run: the item does not match this action’s condition.';
+      notMatched++;
+      await o.onStep?.(steps);
+      continue;
+    }
     try {
       const out = await runStep(a.steps[i] as AutoStep, cur, { automationName: a.name, dry: o.dry, now: o.now });
       steps[i].status = out.status === 'dry' ? 'dry' : out.status === 'skipped' ? 'skipped' : 'ok';
@@ -110,20 +121,26 @@ export async function runSteps(a: AutomationRow, cur: Cur, o: { dry: boolean; no
       if (out.dueAt) dueAt = out.dueAt;
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
-      if (e instanceof StopItem) { steps[i].status = 'skipped'; steps[i].detail = msg; stopped = msg; }
+      if (e instanceof StopItem) { steps[i].status = 'skipped'; steps[i].detail = msg; stopped = msg; stopAt = i; }
       else { steps[i].status = 'failed'; steps[i].detail = msg; failedAt = i; }
       break;
     }
     await o.onStep?.(steps);
   }
-  const cut = failedAt >= 0 ? failedAt : stopped ? steps.findIndex((s) => s.status === 'skipped') : -1;
+  const cut = failedAt >= 0 ? failedAt : stopAt;
   if (cut >= 0) for (let j = cut + 1; j < steps.length; j++) if (steps[j].status === 'pending') { steps[j].status = 'skipped'; steps[j].detail = 'Not run: an earlier action stopped it.'; }
   let status: ItemResult['status'];
   let detail: string;
   if (failedAt >= 0) { status = 'failed'; detail = `Stopped at “${steps[failedAt].name}”: ${steps[failedAt].detail}`; }
   else if (stopped) { status = 'skipped'; detail = stopped; }
   else if (o.dry) { status = 'dry'; detail = `Dry run: ${a.steps.length} action(s) would run, nothing was sent or changed.`; }
-  else { status = 'sent'; detail = a.steps.length ? `All ${a.steps.length} action(s) finished.` : 'No action is set up yet.'; }
+  else if (notMatched > 0 && notMatched === a.steps.length) { status = 'skipped'; detail = 'No action matched this item: each action has its own condition, and none holds for it.'; }
+  else {
+    status = 'sent';
+    detail = a.steps.length
+      ? `All ${a.steps.length} action(s) finished.` + (notMatched ? ` ${notMatched} did not match their condition and were skipped.` : '')
+      : 'No action is set up yet.';
+  }
   return { status, detail, steps, failedAt, postId, dueAt };
 }
 
@@ -232,7 +249,12 @@ export async function runAutomation(id: string, opts: { dry?: boolean; only?: st
       return report;
     }
     if (!a.enabled && !opts.dry && !opts.force) return report;
-    const trig = a.trigger;                       // a record trigger or a schedule (website events returned above)
+    const trig = a.trigger;
+  // a schedule that has never been armed starts from now: the occurrences that passed before this moment are not run
+  if (trig.kind === 'schedule' && trig.lastDue === undefined && !opts.dry && !opts.force && !opts.only) {
+    await db.automations.update(id, { trigger: { ...trig, lastDue: armedLastDue(trig.when, now) } });
+    return report;
+  }                       // a record trigger or a schedule (website events returned above)
     const table = trig.table;
     const records = recordsOf(table);
     const on: RecordEvent = trig.kind === 'record' ? trig.on ?? { kind: 'matches' } : { kind: 'matches' };
@@ -246,6 +268,10 @@ export async function runAutomation(id: string, opts: { dry?: boolean; only?: st
       const plan = planRun(trig.filter, a.fired, records, now, on);
       todo = runAll ? plan.fire : plan.fire.filter((r) => a.fired[r.id]);
       clear = plan.clear;
+    }
+    // a schedule that runs a set number of rows each time takes the next ones in table order; the rest wait for the next time
+    if (dueAt !== undefined && trig.kind === 'schedule' && trig.when.mode === 'weekly' && !opts.only && !opts.dry && !opts.force) {
+      todo = takeForOccurrence(todo, trig.when.perTime);
     }
     if (opts.dry && !opts.only) todo = todo.slice(0, 5);
     if (clear.length && !opts.dry) await saveFired(a.id, Object.fromEntries(clear.map((k) => [k, null])));
@@ -324,11 +350,12 @@ export function startAutomationLoop(): () => void {
   let timer: number | undefined;
   const soon = () => { clearTimeout(timer); timer = window.setTimeout(() => void tickAll().catch(() => undefined), 1500); };
   const unsubs = [recordsStore.subscribe(soon), tablesStore.subscribe(soon)];
-  const iv = window.setInterval(() => void tickAll().catch(() => undefined), 20_000);
+  const iv = window.setInterval(() => { void tickAll().catch(() => undefined); void sweepUploads().catch(() => undefined); }, 20_000);
   void (async () => {
     await migrateAutomationsOnce().catch(() => undefined);
     await markInterruptedAutoRuns().catch(() => undefined);
     soon();
+    void sweepUploads().catch(() => undefined);
   })();
   return () => { clearInterval(iv); clearTimeout(timer); unsubs.forEach((u) => u()); };
 }

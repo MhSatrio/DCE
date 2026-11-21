@@ -3,18 +3,26 @@ import { cloneDoc, newDoc, parseNjs, renumberLayers, serializeNjs, touch, uid, w
 import type { AssetRef, NjsDoc, RenderData } from '../engine/types';
 import { guard, notify } from '../ui/store';
 import { dropThumb } from '../ui/Thumb';
-import { allFields } from './fields';
+import { allFields, defaultValueOf, getValue } from './fields';
 import { db, type AssetRow, type ContentRecord, type FieldDef, type TemplateRow } from './schema';
 import { recordsStore } from './stores';
-import { CONTENT_TABLE, createRows, deleteFieldIn, deleteRows, loadTables, saveFieldIn, updateRow, updateRowsWith, writeRows } from './tables';
+import { assignPositions, byPosition } from './order';
+import { rasterizeSvg } from './svgraster';
+import { viewBoxOf } from '../assets/svgdoc';
+import { imageNameFor, remoteImage } from './remote';
+import { clearImageCaches } from './provider';
+import { CONTENT_TABLE, createRows, deleteFieldIn, deleteRows, fieldsOf, loadTables, masterKeyOf, recordsOf, saveFieldIn, updateRow, updateRowsWith, writeRows } from './tables';
 
 // ======================= records (the Content Plan; every write goes through db/tables.ts so links / synced fields stay consistent)
 
 export { recordsStore };
 
 export async function loadRecords(): Promise<void> {
-  const [records, fields] = await Promise.all([db.records.orderBy('created_at').toArray(), db.fields.orderBy('order').toArray()]);
-  recordsStore.set({ records, fields: fields.filter((f) => !f.tableId || f.tableId === CONTENT_TABLE), loaded: true });
+  const [records, fields] = await Promise.all([db.records.toArray(), db.fields.toArray()]);
+  const fixed = assignPositions(records);
+  if (fixed.length) await db.records.bulkPut(fixed);
+  records.sort(byPosition);
+  recordsStore.set({ records, fields: fields.filter((f) => !f.tableId || f.tableId === CONTENT_TABLE).sort((a, b) => a.order - b.order), loaded: true });
   await loadTables();
 }
 
@@ -22,7 +30,7 @@ export function newRecord(partial: Partial<ContentRecord> = {}): ContentRecord {
   const now = Date.now();
   const title = partial.title ?? 'Untitled record';
   return {
-    id: uid(), title, slug: slugify(title), status: 'Draft', publish_date: '', content: '', image_asset: '', template_ref: '',
+    id: uid(), title, slug: slugify(title), status: defaultValueOf(recordsStore.get().fields, 'status'), publish_date: '', content: '', image_asset: '', template_ref: '',
     tags: [], created_at: now, updated_at: now, data: {}, ...partial,
   };
 }
@@ -43,22 +51,17 @@ export function fieldsList(): FieldDef[] {
   return allFields(recordsStore.get().fields);
 }
 
-/** The `content.*` scope a template sees for a record. */
-export function recordContent(rec: ContentRecord): Record<string, unknown> {
-  return {
-    ...rec.data,
-    id: rec.id,
-    title: rec.title,
-    slug: rec.slug || slugify(rec.title),
-    status: rec.status,
-    publish_date: rec.publish_date,
-    content: rec.content,
-    image_asset: rec.image_asset,
-    template_ref: rec.template_ref,
-    tags: rec.tags,
-    created_at: new Date(rec.created_at).toISOString(),
-    updated_at: new Date(rec.updated_at).toISOString(),
-  };
+/**
+ * The `content.*` scope a template sees for a record: one value per field of the record's table, built-in and custom,
+ * by field key. `title` is the record's name (its Master Field) unless the table has its own field called title, and
+ * `slug` is made from the name when it is empty.
+ */
+export function recordContent(rec: ContentRecord, table: string = rec.table ?? CONTENT_TABLE, fields: FieldDef[] = fieldsOf(table)): Record<string, unknown> {
+  const scope: Record<string, unknown> = { id: rec.id };
+  for (const f of fields) scope[f.key] = getValue(rec, f.key);
+  if (!('title' in scope)) scope.title = getValue(rec, masterKeyOf(table)) ?? '';
+  scope.slug = scope.slug || slugify(String(scope.title ?? ''));
+  return scope;
 }
 
 export function renderDataFor(rec: ContentRecord, doc: NjsDoc, index = 1, total = 1, overrides: Record<string, unknown> = {}): RenderData {
@@ -68,6 +71,17 @@ export function renderDataFor(rec: ContentRecord, doc: NjsDoc, index = 1, total 
   }
   Object.assign(template, overrides);
   return { content: recordContent(rec), template, batch: { index, total } };
+}
+
+/** The table a template draws its records from (set in the editor's Data tab). Templates made before that choice use the Content Plan. */
+export function dataTableOf(doc: NjsDoc | undefined): string {
+  return (doc?.meta as { dataTable?: string } | undefined)?.dataTable || CONTENT_TABLE;
+}
+
+/** The record a preview shows first: one that the template is linked to (a relation field that points at templates), else the first record. */
+export function sampleRecordFor(doc: NjsDoc, table: string, records: ContentRecord[]): ContentRecord | undefined {
+  const link = fieldsOf(table).find((f) => f.type === 'relation' && f.relationTo === 'templates');
+  return (link && records.find((r) => getValue(r, link.key) === doc.meta.id)) || records[0];
 }
 
 // ======================= templates =======================
@@ -183,20 +197,6 @@ async function decodeImage(blob: Blob): Promise<ImageBitmap> {
   return createImageBitmap(blob);
 }
 
-async function rasterizeSvg(blob: Blob): Promise<Blob> {
-  const url = URL.createObjectURL(blob);
-  try {
-    const img = new Image();
-    img.decoding = 'async';
-    await new Promise<void>((res, rej) => { img.onload = () => res(); img.onerror = () => rej(new Error('SVG could not be decoded')); img.src = url; });
-    let w = img.naturalWidth || 512, h = img.naturalHeight || 512;
-    const s = Math.min(4, 1600 / Math.max(w, h));
-    w = Math.max(1, Math.round(w * s)); h = Math.max(1, Math.round(h * s));
-    const c = new OffscreenCanvas(w, h);
-    c.getContext('2d')!.drawImage(img, 0, 0, w, h);
-    return await c.convertToBlob({ type: 'image/png' });
-  } finally { URL.revokeObjectURL(url); }
-}
 
 export async function makeThumb(bm: ImageBitmap, max = 256): Promise<Blob> {
   const s = Math.min(1, max / Math.max(bm.width, bm.height));
@@ -231,24 +231,39 @@ export async function storeAssetBlob(
   return row;
 }
 
-export async function importAssetFiles(files: File[]): Promise<{ added: AssetRow[]; failed: string[] }> {
+/**
+ * Adds uploaded files to the library, into `category` (the folder being shown, when there is one). An SVG is kept as a
+ * vector drawing (its text is the asset, so it can be edited); a PNG of it is made for the templates.
+ */
+export async function importAssetFiles(files: File[], opts: { category?: string } = {}): Promise<{ added: AssetRow[]; failed: string[] }> {
   const added: AssetRow[] = []; const failed: string[] = [];
   for (const f of files) {
-    try { added.push(await storeAssetBlob(f, f.name)); } catch (e) { failed.push(`${f.name}: ${e instanceof Error ? e.message : String(e)}`); }
+    try {
+      if (f.type === 'image/svg+xml' || /\.svg$/i.test(f.name)) added.push(await storeSvgFile(f, opts.category));
+      else added.push(await storeAssetBlob(f, f.name, { category: opts.category }));
+    } catch (e) { failed.push(`${f.name}: ${e instanceof Error ? e.message : String(e)}`); }
   }
   return { added, failed };
 }
 
+async function storeSvgFile(f: File, category?: string): Promise<AssetRow> {
+  if (f.size > MAX_ASSET_BYTES) throw new Error(`${f.name} is larger than ${MAX_ASSET_BYTES / 1024 / 1024} MB.`);
+  const text = await f.text();
+  if (!/<svg[\s>]/i.test(text)) throw new Error(`${f.name} is not an SVG drawing.`);
+  const box = viewBoxOf(text);
+  return storeSvgAsset(text, f.name, Math.max(1, Math.round(box?.w ?? 512)), Math.max(1, Math.round(box?.h ?? 512)), { category: category ?? 'Uncategorised', tags: [] });
+}
+
+/**
+ * Imports the image at a web address into the library. The download is the one the batch uses (a Google Drive share link is
+ * turned into the file itself, and a server that does not allow the browser to read it goes through the local helper).
+ */
 export async function importAssetUrl(url: string): Promise<AssetRow> {
-  if (!/^https?:\/\//i.test(url)) throw new Error('Enter an http(s) image URL.');
-  let res: Response;
-  try { res = await fetch(url, { mode: 'cors' }); } catch {
-    throw new Error('The server did not allow the browser to download this image (CORS) or you are offline. Download it and upload the file instead.');
-  }
-  if (!res.ok) throw new Error(`The server answered ${res.status}.`);
-  const blob = await res.blob();
-  const name = decodeURIComponent(new URL(url).pathname.split('/').pop() || 'remote-image') || 'remote-image';
-  return storeAssetBlob(blob, name, { sourceUrl: url, category: 'Remote' });
+  const address = url.trim();
+  if (!/^https?:\/\//i.test(address)) throw new Error('Enter an http(s) image URL.');
+  const got = await remoteImage(address);
+  if (!got.ok) throw new Error(got.reason);
+  return storeAssetBlob(got.blob, imageNameFor(address, got.blob.type), { sourceUrl: address, category: 'Remote' });
 }
 
 export async function recordsUsingAsset(assetId: string): Promise<ContentRecord[]> {
@@ -285,4 +300,43 @@ export async function removeSampleData(): Promise<void> {
   });
   await loadRecords();
   notify('success', 'Sample data removed.');
+}
+
+/**
+ * Stores an SVG as an asset: the SVG itself is kept (editable, exportable), and a PNG preview is made for the thumbnail.
+ * Templates draw raster images, so an SVG asset is for editing and export; use the PNG cut-out or the raster for designs.
+ */
+export async function storeSvgAsset(svg: string, name: string, width: number, height: number, opts: { category?: string; tags?: string[] } = {}): Promise<AssetRow> {
+  const blob = new Blob([svg], { type: 'image/svg+xml' });
+  if (blob.size > MAX_ASSET_BYTES) throw new Error(`${name} is larger than ${MAX_ASSET_BYTES / 1024 / 1024} MB.`);
+  const preview = await rasterizeSvg(blob);
+  const bm = await decodeImage(preview);
+  const thumb = await makeThumb(bm);
+  bm.close();
+  const row: AssetRow = {
+    id: uid(), name: /\.svg$/i.test(name) ? name : `${name}.svg`, mime: 'image/svg+xml', size: blob.size,
+    width, height, aspect: Math.round((width / height) * 1000) / 1000,
+    blob, thumb, raster: preview, tags: opts.tags ?? [], category: opts.category ?? 'Uncategorised', created_at: Date.now(),
+  };
+  await db.assets.put(row);
+  return row;
+}
+
+/**
+ * Saves a changed SVG into an existing SVG asset (the same id, so every template that uses it draws the new version).
+ * The PNG and the thumbnail are made again from the new SVG.
+ */
+export async function updateSvgAsset(id: string, svg: string): Promise<AssetRow> {
+  const row = await db.assets.get(id);
+  if (!row) throw new Error('That asset no longer exists.');
+  const blob = new Blob([svg], { type: 'image/svg+xml' });
+  if (blob.size > MAX_ASSET_BYTES) throw new Error(`The SVG is larger than ${MAX_ASSET_BYTES / 1024 / 1024} MB.`);
+  const preview = await rasterizeSvg(blob);
+  const bm = await decodeImage(preview);
+  const thumb = await makeThumb(bm);
+  const next: AssetRow = { ...row, blob, size: blob.size, thumb, raster: preview, width: bm.width, height: bm.height, aspect: Math.round((bm.width / bm.height) * 1000) / 1000 };
+  bm.close();
+  await db.assets.put(next);
+  clearImageCaches();
+  return next;
 }

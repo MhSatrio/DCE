@@ -11,6 +11,7 @@ import { confirmAction, notify } from '../ui/store';
 import { Connections } from './settings/Connections';
 import { GeminiConnection } from './settings/GeminiConnection';
 import { HttpConnections } from './settings/HttpConnections';
+import { CloudConnections } from './settings/CloudConnections';
 
 async function addFontFile(file: File, family: string, weight: string, style: 'normal' | 'italic'): Promise<void> {
   if (file.size > 8 * 1024 * 1024) throw new Error('Font files larger than 8 MB are not accepted.');
@@ -105,6 +106,7 @@ export default function Settings() {
       <Connections />
       <GeminiConnection />
       <HttpConnections />
+      <CloudConnections />
       <section className="panel">
         <div className="panel-head"><h2>Storage</h2></div>
         <div className="panel-body col">

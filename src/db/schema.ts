@@ -4,7 +4,7 @@ import type { NjsDoc } from '../engine/types';
 export type FieldType =
   | 'text' | 'longtext' | 'number' | 'boolean' | 'date' | 'select' | 'multiselect'
   | 'url' | 'image' | 'relation' | 'markdown' | 'json'
-  | 'email' | 'phone' | 'currency' | 'percent' | 'rating' | 'datetime'
+  | 'email' | 'phone' | 'currency' | 'percent' | 'rating' | 'datetime' | 'formula'
   | 'link' | 'createdTime' | 'modifiedTime' | 'autonumber';
 
 export interface FieldDef {
@@ -14,6 +14,10 @@ export interface FieldDef {
   type: FieldType;
   builtin?: boolean;
   readonly?: boolean;
+  /** Built-in fields only: start hidden in the grid (instead of a list of names in the grid code). */
+  hiddenByDefault?: boolean;
+  /** The value a new record or imported row starts with (a choice of a select field). */
+  defaultValue?: string;
   options?: string[];   // select / multiselect
   relationTo?: 'templates' | 'assets' | 'records';
   order: number;
@@ -29,16 +33,25 @@ export interface FieldDef {
   sync?: { via: string; source: string };
   currency?: string;    // symbol for 'currency', e.g. "$", "Rp"
   ratingMax?: number;   // 'rating'
+  /** A link field that points each image at its carousel record (shown as "Page N of <carousel name>"). */
+  carouselPage?: boolean;
 }
 
-export interface TableDef { id: string; name: string; created_at: number }
+/**
+ * A carousel table: one record per group of `groupSize` consecutive images of `source` (the link field `linkField` holds
+ * each image's URL). It is an ordinary table with its own records, Master Field and custom fields.
+ * With `closingAsset` (an image of Assets with a public address), the last slot of every carousel is that image (a closing
+ * call to action), so each carousel holds groupSize − 1 images of the table followed by it.
+ */
+export interface CarouselSpec { source: string; linkField: string; groupSize: number; closingAsset?: string }
+export interface TableDef { id: string; name: string; created_at: number; carousel?: CarouselSpec }
 
 /** Non-secret description of a Buffer channel, so the screens can show "LinkedIn · Vier Apparatus" instead of an id. */
 export interface ChannelMeta { service: string; name: string; org: string }
 export interface ConnectionProp { id: string; key: string; secret: boolean; value?: string; enc?: string; meta?: ChannelMeta }
 export interface ConnectionRow {
   id: string;
-  provider: 'buffer' | 'gemini' | 'http' | 'custom';
+  provider: 'buffer' | 'gemini' | 'http' | 'custom' | 'r2' | 'gdrive';
   name: string;
   created_at: number;
   props: ConnectionProp[];
@@ -76,7 +89,8 @@ export interface AutoFilter { join: 'and' | 'or'; conditions: { id: string; fiel
 export type RecordEvent = { kind: 'matches' } | { kind: 'created' } | { kind: 'changed'; field: string };
 
 /** When a schedule fires: once at a date and time, or every week on the chosen days (0 = Sunday) at a time. */
-export type WeeklyWhen = { mode: 'once'; at: string } | { mode: 'weekly'; time: string; days: number[] };
+/** perTime: how many matching rows run each time (undefined = all of them at once; 1 = one row, in table order). */
+export type WeeklyWhen = { mode: 'once'; at: string } | { mode: 'weekly'; time: string; days: number[]; perTime?: number };
 
 export type AutoTrigger =
   | { kind: 'record'; table: string; filter: AutoFilter; on?: RecordEvent }
@@ -87,17 +101,55 @@ export type AutoTrigger =
  * One "Then" step. A step belongs to a connection (Buffer, Gemini, an API) or to this app's tables; the editor offers only
  * the actions of that connection. Templates use {{field}} for the current item (a record, or a website item).
  */
-export type AutoStep =
-  | { kind: 'buffer_post'; connectionId: string; channel: string; text: string; imageField?: string; timing: TimingConfig; resultField?: string }
+type StepAction =
+  | { kind: 'buffer_post'; connectionId: string; channel: string; text: string; imageField?: string; timing: TimingConfig; resultField?: string; instagramType?: 'post' | 'story' | 'reel' }
   | { kind: 'pipeline_post' }
   | { kind: 'gemini_fill'; connectionId: string; table: string; prompt: string }
   | { kind: 'http'; connectionId: string; method: AutoMethod; path: string; body: string; table?: string; resultField?: string }
   | { kind: 'add_row'; table: string; mapping: Record<string, string> }
-  | { kind: 'set_field'; table: string; field: string; value: string }
+  /** Update a record: the record is the one that started the automation (no match), or every record where `match.field` has `match.value`. `also` are more fields of the same record. */
+  | { kind: 'set_field'; table: string; field: string; value: string; match?: { field: string; value: string }; also?: { field: string; value: string }[] }
+  /** Delete a record: the record that started the automation, or the records where `match.field` has `match.value`. With `fileField`, the Cloudflare R2 files its links point at are deleted first. */
+  | { kind: 'delete_record'; table: string; match?: { field: string; value: string }; fileField?: string }
   | { kind: 'sync_posts'; table: string }
-  | { kind: 'render'; table: string; templateId: string; format: AutoFormat }
+  | { kind: 'render'; table: string; templateId: string; format: AutoFormat; dest?: OutputDest }
   /** Sets `field` of the item to a random date and time inside the window (only if it is empty, when onlyIfEmpty). */
   | { kind: 'random_time'; table: string; field: string; from: string; to: string; fromTime: string; toTime: string; weekdays: boolean; onlyIfEmpty: boolean };
+
+/** One "Then" action, with its own condition (like a trigger's): it runs only for an item that matches `filter`, and is skipped for the others. No condition: it runs for every item. */
+export type AutoStep = StepAction & { filter?: AutoFilter };
+
+/**
+ * Where a render sends its files: this computer (a ZIP download, the default), a Cloudflare R2 bucket or a Google Drive
+ * folder. The link of each uploaded file is written into the Uploaded link field of its record (or the field chosen).
+ */
+export interface OutputDest {
+  kind: 'zip' | 'r2' | 'drive';
+  connId: string;
+  folder: string;        // what was typed: a Drive folder link or id
+  folderId: string;      // the resolved Drive folder id ('' until checked)
+  folderName: string;
+  table: string;         // the table whose records receive the links ('' = the table the render draws from)
+  field: string;         // the link field ('uploaded_link', or '__create__' to create it when the run starts)
+  keepZip: boolean;      // keep a ZIP download as well
+  keepHours?: number;    // R2 only: delete the uploaded files this many hours later (undefined = keep them)
+  keepUntil?: string;    // R2 only: or delete them at this local date and time, YYYY-MM-DDTHH:MM
+}
+
+/** A file uploaded to Cloudflare R2 whose deletion is due. The link stays in its record until the file is deleted. */
+export interface UploadRow {
+  id: string;
+  connId: string;        // the R2 connection that holds the file
+  key: string;           // the object key in the bucket
+  url: string;           // the public address written into the record
+  table?: string;        // the record that holds the link (its link is removed when the file is deleted)
+  recordId?: string;
+  field?: string;
+  deleteAt: number;      // when the file is deleted (ms since 1970)
+  attempts: number;      // failed deletions so far
+  lastError?: string;
+  created_at: number;
+}
 
 export interface AutomationRow {
   id: string;
@@ -159,6 +211,8 @@ export interface ContentRecord {
   /** Rows of custom tables carry their table id; Content Plan records leave it undefined. */
   table?: string;
   sample?: boolean;
+  /** The place of the row in its table (smaller first). Kept when the table is edited, so the order does not change. */
+  position?: number;
   [k: string]: unknown;
 }
 
@@ -190,8 +244,17 @@ export interface AssetRow {
   tags: string[];
   category: string;
   sourceUrl?: string;
+  /** the public address of the file (set for imported and uploaded files); what Buffer and the carousels use */
+  publicUrl?: string;
+  /** SVG assets: a PNG of the SVG, for drawing in templates and the batch renderer */
+  raster?: Blob;
   created_at: number;
   sample?: boolean;
+}
+
+/** The address of an image for Buffer and the carousels: its public address, else where it was imported from. */
+export function assetAddress(a: Pick<AssetRow, 'publicUrl' | 'sourceUrl'>): string | undefined {
+  return a.publicUrl?.trim() || a.sourceUrl?.trim() || undefined;
 }
 
 export interface FontRow {
@@ -210,7 +273,6 @@ export interface JobFailure { recordId: string; title: string; error: string }
 
 export interface BatchConfig {
   templateId: string;
-  database: 'content_plan';
   selection: 'filtered' | 'selected' | 'range' | 'individual';
   filter: { join: 'and' | 'or'; conditions: { id: string; field: string; op: string; value: string }[] };
   rangeFrom?: number;
@@ -231,7 +293,8 @@ export interface JobRow {
   parentId?: string;           // set when this run retried a previous job
   templateId: string;
   templateName: string;
-  database: string;
+  /** The table the records came from (undefined = the Content Plan). */
+  table?: string;
   selectionLabel: string;
   config: BatchConfig;
   recordIds: string[];
@@ -363,6 +426,7 @@ export class DceDB extends Dexie {
   rows!: Table<ContentRecord, string>;
   connections!: Table<ConnectionRow, string>;
   automations!: Table<AutomationRow, string>;
+  uploads!: Table<UploadRow, string>;
   autoRuns!: Table<AutoRunRow, string>;
   sources!: Table<SourceRow, string>;
   posts!: Table<PostRow, string>;
@@ -420,6 +484,10 @@ export class DceDB extends Dexie {
     // version 5: one Automations list (record and website triggers). Old rows are converted once by migrateAutomationsOnce().
     this.version(5).stores({
       automations: 'id, enabled, created_at',
+    });
+    // version 6: the uploaded R2 files that are to be deleted (indexed by when)
+    this.version(6).stores({
+      uploads: 'id, deleteAt, connId',
     });
   }
 }

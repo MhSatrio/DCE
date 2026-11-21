@@ -1,6 +1,6 @@
 {
   "name": "dynamic-canvas-engine",
-  "version": "1.6.0",
+  "version": "1.23.1",
   "private": true,
   "type": "module",
   "description": "Dynamic Canvas Engine (DCE) - free, open-source, local-first design and batch-generation studio. Concept and product requirements: Muhammad Satrio.",
@@ -30,6 +30,7 @@
     "dompurify": "^3.2.0",
     "fabric": "^6.9.1",
     "fflate": "^0.8.2",
+    "imagetracerjs": "1.2.6",
     "lucide-react": "^0.468.0",
     "marked": "^15.0.0",
     "react": "^19.0.0",
@@ -64,6 +65,7 @@
       "dist/**/*",
       "desktop/**/*",
       "server/relay-core.cjs",
+      "server/cloud.cjs",
       "package.json"
     ],
     "extraResources": [

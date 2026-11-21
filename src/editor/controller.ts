@@ -1,6 +1,7 @@
 import { ActiveSelection, Canvas, FabricObject, util, type TPointerEventInfo } from 'fabric';
 import { mainProvider } from '../db/provider';
-import { recordsStore, renderDataFor } from '../db/repo';
+import { dataTableOf, renderDataFor, sampleRecordFor } from '../db/repo';
+import { recordsOf } from '../db/tables';
 import { makeNode, syncPlaceholders, uid } from '../engine/njs';
 import { buildScene, type ImageLike, type SceneEnv } from '../engine/scene';
 import type { DceNode, Issue, NjsDoc, RenderData } from '../engine/types';
@@ -10,6 +11,9 @@ import * as M from './model';
 import * as PH from './path';
 
 export type ToolId = 'select' | 'rect' | 'ellipse' | 'line' | 'text' | 'image' | 'polygon' | 'star' | 'frame' | 'pen';
+
+/** A line pulled from a ruler. A view aid: it is not saved in the template, and a moved element snaps to it. */
+export interface RulerGuide { id: number; axis: 'x' | 'y'; pos: number }
 
 export interface EdState {
   doc: NjsDoc;
@@ -25,6 +29,7 @@ export interface EdState {
   previewRecordId: string;
   grid: boolean;
   snap: boolean;
+  rulerGuides: RulerGuide[];
   editingText: string | null;
   imageTarget: string | null;     // node id waiting for an asset (null = none)
   pickNewImage: boolean;
@@ -65,13 +70,14 @@ export class EditorController implements DceHost {
   private disposed = false;
   private fitted = false;
   private pasteCount = 0;
+  private guideSeq = 0;
 
   constructor(doc: NjsDoc) {
-    const recs = recordsStore.get().records;
-    const rec = recs.find((r) => r.template_ref === doc.meta.id) ?? recs.find((r) => r.status === 'Approved') ?? recs[0];
+    const table = dataTableOf(doc);
+    const rec = sampleRecordFor(doc, table, recordsOf(table));
     this.store = createStore<EdState>({
       doc, selection: [], tool: 'select', zoom: 1, panX: 0, panY: 0, canUndo: false, canRedo: false, dirty: false,
-      previewOn: !!rec, previewRecordId: rec?.id ?? '', grid: false, snap: true, editingText: null, imageTarget: null,
+      previewOn: !!rec, previewRecordId: rec?.id ?? '', grid: false, snap: true, rulerGuides: [], editingText: null, imageTarget: null,
       pickNewImage: false, issues: [], pointer: null, penPoints: 0, editingPath: null, pathSel: null, rev: 0,
     });
   }
@@ -81,8 +87,15 @@ export class EditorController implements DceHost {
   data(): RenderData | null {
     const s = this.store.get();
     if (!s.previewOn) return null;
-    const rec = recordsStore.get().records.find((r) => r.id === s.previewRecordId);
+    const table = dataTableOf(s.doc);
+    const rec = recordsOf(table).find((r) => r.id === s.previewRecordId);
     return rec ? renderDataFor(rec, s.doc, 1, 1) : null;
+  }
+  /** Chooses the table the template draws its records from (the Data tab). The preview switches to a record of that table. */
+  setDataTable(table: string): void {
+    this.commit((d) => { (d.meta as { dataTable?: string }).dataTable = table; }, { rebuild: false });
+    const rec = sampleRecordFor(this.doc(), table, recordsOf(table));
+    this.store.set((s) => ({ previewOn: !!rec, previewRecordId: rec?.id ?? '' }));
   }
   requestImage(ref: string): void {
     if (this.env.images.has(ref) || this.loading.has(ref)) return;
@@ -360,13 +373,18 @@ export class EditorController implements DceHost {
       const b = bboxOf(o);
       xs.push(b.l, b.cx, b.r); ys.push(b.t, b.cy, b.b);
     }
-    const best = (mine: number[], cands: number[]) => {
+    const best = (mine: number[], cands: number[], limit = thr) => {
       let dBest = Infinity, line = 0;
       for (const m of mine) for (const cnd of cands) { const d = cnd - m; if (Math.abs(d) < Math.abs(dBest)) { dBest = d; line = cnd; } }
-      return Math.abs(dBest) <= thr ? { d: dBest, line } : null;
+      return Math.abs(dBest) <= limit ? { d: dBest, line } : null;
     };
     let dx = 0, dy = 0;
-    const bx = best([box.l, box.cx, box.r], xs), by = best([box.t, box.cy, box.b], ys);
+    // a ruler guide pulls an element from a little farther away than another element's edge does (the magnet)
+    const guideLimit = 10 / s.zoom;
+    const gx = s.rulerGuides.filter((g) => g.axis === 'x').map((g) => g.pos);
+    const gy = s.rulerGuides.filter((g) => g.axis === 'y').map((g) => g.pos);
+    const bx = best([box.l, box.cx, box.r], gx, guideLimit) ?? best([box.l, box.cx, box.r], xs);
+    const by = best([box.t, box.cy, box.b], gy, guideLimit) ?? best([box.t, box.cy, box.b], ys);
     if (bx) { dx = bx.d; this.guides.x.push(bx.line); }
     if (by) { dy = by.d; this.guides.y.push(by.line); }
     const g = doc.constraints.snapGrid ?? 10;
@@ -768,6 +786,20 @@ export class EditorController implements DceHost {
   setPreviewRecord(id: string): void { this.store.set({ previewRecordId: id }); this.canvas.requestRenderAll(); this.scheduleIssues(); }
   setGrid(on: boolean): void { this.store.set({ grid: on }); this.canvas.requestRenderAll(); }
   setSnap(on: boolean): void { this.store.set({ snap: on }); }
+
+  /** Ruler guides: added from a ruler, moved by dragging, removed by dragging them back onto the ruler (or all at once). */
+  addRulerGuide(axis: 'x' | 'y', pos: number): number {
+    const id = ++this.guideSeq;
+    this.store.set({ rulerGuides: [...this.store.get().rulerGuides, { id, axis, pos }] });
+    return id;
+  }
+  moveRulerGuide(id: number, pos: number): void {
+    this.store.set({ rulerGuides: this.store.get().rulerGuides.map((g) => (g.id === id ? { ...g, pos } : g)) });
+  }
+  removeRulerGuide(id: number): void {
+    this.store.set({ rulerGuides: this.store.get().rulerGuides.filter((g) => g.id !== id) });
+  }
+  clearRulerGuides(): void { this.store.set({ rulerGuides: [] }); }
 
   private scheduleIssues(): void {
     clearTimeout(this.issueTimer);

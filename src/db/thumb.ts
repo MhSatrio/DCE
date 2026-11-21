@@ -1,14 +1,15 @@
 import { renderDoc } from '../engine/render';
 import type { NjsDoc } from '../engine/types';
 import { mainProvider } from './provider';
-import { recordsStore, renderDataFor } from './repo';
+import { dataTableOf, renderDataFor, sampleRecordFor } from './repo';
+import { recordsOf } from './tables';
 import { db } from './schema';
 
 /** A small PNG preview of a template rendered with the first matching record (or design mode if none). */
 export async function makeTemplateThumb(doc: NjsDoc, width = 360): Promise<Blob | undefined> {
   try {
-    const recs = recordsStore.get().records;
-    const rec = recs.find((r) => r.template_ref === doc.meta.id) ?? recs.find((r) => r.status === 'Approved') ?? recs[0];
+    const table = dataTableOf(doc);
+    const rec = sampleRecordFor(doc, table, recordsOf(table));
     const out = await renderDoc(doc, rec ? renderDataFor(rec, doc) : null, mainProvider, { format: 'png', outW: width, failOnError: false });
     return new Blob([out.bytes as BlobPart], { type: 'image/png' });
   } catch { return undefined; }

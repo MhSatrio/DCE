@@ -2,10 +2,12 @@ import { useEffect, useRef, useState } from 'react';
 import { useLiveQuery } from 'dexie-react-hooks';
 import { Copy, Download, Eye, FileUp, Layers3, Pencil, Plus, Trash2 } from 'lucide-react';
 import { ensureThumb } from '../db/thumb';
-import { createTemplate, deleteTemplate, duplicateTemplate, exportNjs, importNjs, recordsStore } from '../db/repo';
+import { createTemplate, dataTableOf, deleteTemplate, duplicateTemplate, importNjs, sampleRecordFor } from '../db/repo';
+import { rowName, useTableData } from '../db/tables';
 import { db, type TemplateRow } from '../db/schema';
 import { NjsError } from '../engine/njs';
-import { Dialog, download, Empty, go, IconBtn, fmtDate } from '../ui/kit';
+import { Dialog, Empty, go, IconBtn, fmtDate } from '../ui/kit';
+import { ExportMenu } from '../ui/ExportMenu';
 import { useBlobUrl } from '../ui/hooks';
 import { Preview } from '../ui/Preview';
 import { confirmAction, notify, useStore } from '../ui/store';
@@ -33,7 +35,7 @@ function Card({ t, onPreview, onDetails }: { t: TemplateRow; onPreview: () => vo
         <IconBtn icon={<Eye size={15} />} label="Preview" onClick={onPreview} />
         <IconBtn icon={<Pencil size={15} />} label="Rename / details" onClick={onDetails} />
         <IconBtn icon={<Copy size={15} />} label="Duplicate" onClick={async () => { const r = await duplicateTemplate(t.id); if (r) notify('success', `Duplicated as “${r.name}”.`); }} />
-        <IconBtn icon={<Download size={15} />} label="Export .njs" onClick={async () => { const { text, name } = await exportNjs(t.id); download(new Blob([text], { type: 'application/json' }), name); notify('success', `Exported ${name}.`); }} />
+        <ExportMenu doc={t.doc} label="Download as…"><Download size={15} /></ExportMenu>
         <IconBtn icon={<Trash2 size={15} />} label="Delete" onClick={async () => { if (await confirmAction(`Delete “${t.name}”?`, 'Records that use it lose their template link. Export it first if you may need it again.')) { await deleteTemplate(t.id); notify('success', 'Template deleted.'); } }} />
       </div>
     </div>
@@ -69,13 +71,14 @@ function DetailsDialog({ t, onClose }: { t: TemplateRow; onClose: () => void }) 
 }
 
 function PreviewDialog({ t, onClose }: { t: TemplateRow; onClose: () => void }) {
-  const records = useStore(recordsStore, (s) => s.records);
-  const [rid, setRid] = useState(records.find((r) => r.template_ref === t.id)?.id ?? records[0]?.id ?? '');
+  const table = dataTableOf(t.doc);
+  const { records } = useTableData(table);
+  const [rid, setRid] = useState(sampleRecordFor(t.doc, table, records)?.id ?? '');
   const rec = records.find((r) => r.id === rid);
   return (
     <Dialog title={`Preview — ${t.name}`} onClose={onClose} size="mid" foot={<button className="btn primary" onClick={() => { onClose(); go(`#/editor/${t.id}`); }}>Open in editor</button>}>
       <label className="fld"><span>Sample record</span>
-        <select value={rid} onChange={(e) => setRid(e.target.value)}>{records.slice(0, 500).map((r) => <option key={r.id} value={r.id}>{r.title}</option>)}{records.length === 0 && <option value="">(no records — design view)</option>}</select>
+        <select value={rid} onChange={(e) => setRid(e.target.value)}>{records.slice(0, 500).map((r) => <option key={r.id} value={r.id}>{rowName(r, table)}</option>)}{records.length === 0 && <option value="">(no records — design view)</option>}</select>
       </label>
       <div style={{ display: 'flex', justifyContent: 'center' }}><Preview doc={t.doc} record={rec} width={560} /></div>
     </Dialog>

@@ -51,7 +51,8 @@ export interface NodeConstraints {
 
 export interface NodeBinding {
   text?: { template: string; fallback?: string };
-  image?: { key: string; fallback?: string };
+  /** `cutout`: the background that touches the image's border is removed when the image is drawn (the file itself is not changed). */
+  image?: { key: string; fallback?: string; cutout?: boolean };
   fill?: { key: string; fallback?: string };
   /** Safe expression, e.g. `content.discount` or `content.status == "Approved"`. */
   visible?: { expr: string };

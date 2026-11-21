@@ -1,11 +1,15 @@
 import { Zip, ZipDeflate, ZipPassThrough } from 'fflate';
 import { assetBlobFor, isRemoteRef } from '../db/provider';
+import { remoteImage } from '../db/remote';
+import { removeBackground } from '../assets/tools';
 import { db, type BatchConfig, type ContentRecord, type JobFailure, type JobRow, type JobStatus } from '../db/schema';
 import { recordContent, renderDataFor } from '../db/repo';
+import { customFontPayloads } from '../db/customFonts';
+import { CONTENT_TABLE } from '../db/constants';
 import { renderFilename, slugify, UniqueNames } from '../engine/binding';
 import { jostFontCss, bytesToBase64, type FontPayload } from '../engine/fonts';
 import { jpegToPdf, PdfWriter } from '../engine/pdf';
-import { collectImageRefs } from '../engine/scene';
+import { CUTOUT_TOLERANCE, collectImageRefs, cutoutBaseRef } from '../engine/scene';
 import { uid, walkNodes } from '../engine/njs';
 import type { NjsDoc, RenderData } from '../engine/types';
 import { createStore, type Store } from '../ui/store';
@@ -30,15 +34,37 @@ export interface RunState {
   error: string | null;
 }
 
+/**
+ * Where the rendered files go besides (or instead of) the ZIP: Cloudflare R2 or Google Drive. `put` sends one file and
+ * returns its public address; `record` writes that address into the record (the Uploaded Link). Files go one at a time.
+ */
+export interface Destination {
+  label: string;
+  put(name: string, bytes: Uint8Array, mime: string): Promise<string>;
+  record(recordId: string, url: string): Promise<void>;
+}
+
+const MIME: Record<string, string> = { png: 'image/png', jpeg: 'image/jpeg', svg: 'image/svg+xml', pdf: 'application/pdf', html: 'text/html; charset=utf-8' };
+
+/** An image address for a message: its host and path, shortened. */
+export const shortAddress = (u: string): string => (u.length > 90 ? `${u.slice(0, 87)}…` : u);
+const mimeOf = (fmt: string) => MIME[fmt] ?? 'application/octet-stream';
+
 export interface RunInput {
   config: BatchConfig;
   doc: NjsDoc;
   templateName: string;
   records: ContentRecord[];
+  /** The table the records belong to (undefined = the Content Plan). */
+  table?: string;
   selectionLabel: string;
   parentId?: string;
   /** Stream the archive straight to disk (File System Access API) instead of keeping it in memory. */
   fileHandle?: FileSystemFileHandle;
+  /** Upload every file to this destination. */
+  destination?: Destination;
+  /** With a destination: keep the ZIP download as well (default: the destination only). */
+  keepZip?: boolean;
 }
 
 interface ManifestEntry {
@@ -49,6 +75,8 @@ interface ManifestEntry {
   status: 'ok' | 'failed' | 'cancelled';
   warnings?: string[];
   error?: string;
+  /** the public address of the file, when it was sent to a destination */
+  url?: string;
 }
 
 const registry = new Map<string, BatchRun>();
@@ -59,19 +87,6 @@ export function defaultConcurrency(): number {
   return Math.max(1, Math.min(4, hc - 1));
 }
 
-async function customFontPayloads(doc: NjsDoc): Promise<{ payloads: FontPayload[]; css: string }> {
-  const used = new Set<string>();
-  for (const n of walkNodes(doc.nodes)) if (n.type === 'text' && n.style.fontFamily) used.add(n.style.fontFamily as string);
-  const rows = (await db.fonts.toArray()).filter((f) => used.has(f.family));
-  const payloads: FontPayload[] = [];
-  let css = '';
-  for (const r of rows) {
-    const data = await r.blob.arrayBuffer();
-    payloads.push({ family: r.family, weight: r.weight, style: r.style, data });
-    css += `@font-face{font-family:'${r.family.replace(/'/g, '')}';font-style:${r.style};font-weight:${r.weight};src:url(data:font/woff2;base64,${bytesToBase64(new Uint8Array(data))});}`;
-  }
-  return { payloads, css };
-}
 
 export class BatchRun {
   readonly store: Store<RunState>;
@@ -107,7 +122,7 @@ export class BatchRun {
     const jobId = uid();
     this.job = {
       id: jobId, parentId: input.parentId, templateId: input.doc.meta.id, templateName: input.templateName,
-      database: 'Content Plan', selectionLabel: input.selectionLabel, config: input.config,
+      table: input.table ?? CONTENT_TABLE, selectionLabel: input.selectionLabel, config: input.config,
       recordIds: input.records.map((r) => r.id), format: input.config.format, status: 'running',
       started_at: Date.now(), total: input.records.length, success: 0, failure: 0, warnings: 0, failures: [],
       errorSummary: '', elapsedMs: 0, throughput: 0,
@@ -246,11 +261,24 @@ export class BatchRun {
     try {
       const refs = collectImageRefs(this.input.doc, data);
       const blobs: Record<string, Blob> = {};
+      const failed: string[] = [];
       for (const ref of new Set([...refs.primary, ...refs.fallback])) {
-        if (isRemoteRef(ref)) continue;
-        const b = await assetBlobFor(ref);
-        if (b) blobs[ref] = b;
+        const base = cutoutBaseRef(ref);
+        let src: Blob | null = null;
+        if (isRemoteRef(base)) {
+          // a web address in the record: downloaded now, drawn like an uploaded image
+          const got = await remoteImage(base);
+          if (got.ok) src = got.blob;
+          else if (refs.primary.includes(ref)) failed.push(`The image at ${shortAddress(base)} could not be downloaded: ${got.reason}`);
+        } else src = await assetBlobFor(base);
+        if (src && base !== ref) {
+          // the template asks for the background to be removed: the cut-out is what the worker draws
+          try { src = (await removeBackground(src, CUTOUT_TOLERANCE)).blob; }
+          catch (e) { src = null; if (refs.primary.includes(ref)) failed.push(`The background of an image could not be removed: ${e instanceof Error ? e.message : String(e)}`); }
+        }
+        if (src) blobs[ref] = src;
       }
+      if (failed.length) { this.complete(w, idx, false, failed.join(' '), []); return; }
       this.store.set({ current: rec.title });
       w.postMessage({ type: 'render', seq: idx, data, blobs } satisfies ToWorker);
     } catch (e) {
@@ -285,8 +313,11 @@ export class BatchRun {
         const outBytes = fmt === 'pdf' ? wrapPdf(bytes, m.width, m.height, rec.title) : bytes;
         const ext = fmt === 'pdf' ? 'pdf' : fmt === 'jpeg' ? 'jpg' : fmt;
         const name = this.names.take(renderFilename(this.cfg.filenamePattern || '{{content.slug}}', data, ext));
-        this.addFile(name, outBytes, fmt === 'svg' || fmt === 'html');
-        this.manifest.push({ filename: name, record_id: rec.id, template_id: this.input.doc.meta.id, output_format: fmt, status: 'ok', warnings: warn.length ? warn : undefined });
+        const dest = this.input.destination;
+        if (!dest || this.input.keepZip) this.addFile(name, outBytes, fmt === 'svg' || fmt === 'html');
+        const entry: ManifestEntry = { filename: name, record_id: rec.id, template_id: this.input.doc.meta.id, output_format: fmt, status: 'ok', warnings: warn.length ? warn : undefined };
+        this.manifest.push(entry);
+        if (dest) this.queueUpload(dest, rec, entry, name, outBytes, mimeOf(fmt));
       }
       this.store.set((s) => ({ bytesOut: s.bytesOut + bytes.length, warnings: s.warnings + (warn.length ? 1 : 0) }));
       this.complete(w, m.seq, true, '', []);
@@ -304,6 +335,28 @@ export class BatchRun {
     }
   }
   private skipped = new Set<number>();
+  private uploadTail: Promise<void> = Promise.resolve();
+
+  /** Sends a file to the destination after the earlier ones, then writes its address into the record. */
+  private queueUpload(dest: Destination, rec: ContentRecord, entry: ManifestEntry, name: string, bytes: Uint8Array, mime: string): void {
+    const job = async (): Promise<void> => {
+      let url: string;
+      try { url = await dest.put(name, bytes, mime); }
+      catch (e) { this.uploadFailed(rec, entry, `The file could not be sent to ${dest.label}: ${e instanceof Error ? e.message : String(e)}`); return; }
+      entry.url = url;
+      try { await dest.record(rec.id, url); }
+      catch (e) { this.uploadFailed(rec, entry, `The file is online (${url}), but its link could not be written to the record: ${e instanceof Error ? e.message : String(e)}`); }
+    };
+    this.uploadTail = this.uploadTail.then(job, job);
+  }
+
+  /** An upload problem counts against the record: it moves from "ok" to "failed" with the reason. */
+  private uploadFailed(rec: ContentRecord, entry: ManifestEntry, error: string): void {
+    entry.status = 'failed';
+    entry.error = error;
+    this.store.set((s) => ({ ok: Math.max(0, s.ok - 1), failed: s.failed + 1, failures: [...s.failures, { recordId: rec.id, title: rec.title, error }] }));
+    this.emit();
+  }
 
   private complete(w: Worker, idx: number, ok: boolean, error: string, details: string[]): void {
     this.busy.set(w, false); this.inflight--; this.inflightByWorker.delete(w);
@@ -382,6 +435,7 @@ export class BatchRun {
           this.addFile('manifest.json', new TextEncoder().encode(JSON.stringify(doc, null, 2)), true);
         }
       }
+      await this.uploadTail;          // every file is sent (or has failed) before the run ends
       this.zip.end();
       await this.zipDone;
       await this.writeChain;
@@ -396,7 +450,8 @@ export class BatchRun {
       this.job.status = status;
       this.job.completed_at = Date.now();
       this.job.outputName = name;
-      this.store.set({ status, output: blob ? { blob, name } : null });
+      const archiveKept = !this.input.destination || !!this.input.keepZip;
+      this.store.set({ status, output: blob && archiveKept ? { blob, name } : null });
     } catch (e) {
       this.job.status = 'failed';
       this.store.set({ status: 'failed', error: e instanceof Error ? e.message : String(e) });

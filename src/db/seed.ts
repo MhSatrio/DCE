@@ -211,7 +211,7 @@ export const SAMPLE_TEMPLATE_NAME = 'Product Announcement';
 
 export function defaultBatchConfig(templateId = ''): BatchConfig {
   return {
-    templateId, database: 'content_plan', selection: 'filtered',
+    templateId, selection: 'filtered',
     filter: { join: 'and', conditions: [{ id: uid(), field: 'status', op: 'eq', value: 'Approved' }] },
     format: 'png', pdfMode: 'separate', outW: 1080, outH: 1080, quality: 0.92, transparent: false,
     filenamePattern: '{{content.slug}}.png', includeManifest: true, concurrency: 0,

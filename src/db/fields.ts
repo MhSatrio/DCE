@@ -1,4 +1,5 @@
 import { slugify } from '../engine/binding';
+import { parseAmount } from './formula';
 import type { ContentRecord, FieldDef, FieldType } from './schema';
 
 export const STATUSES = ['Idea', 'Draft', 'In review', 'Approved', 'Ready to post', 'Posted', 'Published'];
@@ -8,7 +9,7 @@ export const FIELD_TYPE_LABEL: Record<FieldType, string> = {
   select: 'Single select', multiselect: 'Multi-select', url: 'URL', image: 'Image', relation: 'Template link',
   markdown: 'Markdown', json: 'JSON', email: 'Email', phone: 'Phone number', currency: 'Currency', percent: 'Percent',
   rating: 'Rating', datetime: 'Date & time', link: 'Link to another table', createdTime: 'Created time',
-  modifiedTime: 'Last modified time', autonumber: 'Auto number',
+  modifiedTime: 'Last modified time', autonumber: 'Auto number', formula: 'Formula',
 };
 
 /** Types whose value the app fills in itself. */
@@ -16,26 +17,40 @@ export const AUTO_TYPES: FieldType[] = ['createdTime', 'modifiedTime', 'autonumb
 
 export const BUILTIN_FIELDS: FieldDef[] = [
   { id: 'b_title', key: 'title', label: 'Title', type: 'text', builtin: true, order: 0 },
-  { id: 'b_status', key: 'status', label: 'Status', type: 'select', builtin: true, options: STATUSES, order: 1 },
+  { id: 'b_status', key: 'status', label: 'Status', type: 'select', builtin: true, options: STATUSES, defaultValue: 'Draft', order: 1 },
   { id: 'b_publish', key: 'publish_date', label: 'Publish Date', type: 'date', builtin: true, order: 2 },
   { id: 'b_image', key: 'image_asset', label: 'Image Asset', type: 'image', builtin: true, relationTo: 'assets', order: 3 },
   { id: 'b_template', key: 'template_ref', label: 'Template', type: 'relation', builtin: true, relationTo: 'templates', order: 4 },
   { id: 'b_tags', key: 'tags', label: 'Tags', type: 'multiselect', builtin: true, order: 5 },
   { id: 'b_slug', key: 'slug', label: 'Slug', type: 'text', builtin: true, order: 6 },
-  { id: 'b_content', key: 'content', label: 'Content', type: 'markdown', builtin: true, order: 7 },
-  { id: 'b_id', key: 'id', label: 'Record ID', type: 'text', builtin: true, readonly: true, order: 100 },
-  { id: 'b_created', key: 'created_at', label: 'Created At', type: 'date', builtin: true, readonly: true, order: 101 },
-  { id: 'b_updated', key: 'updated_at', label: 'Updated At', type: 'date', builtin: true, readonly: true, order: 102 },
+  { id: 'b_content', key: 'content', label: 'Content', type: 'markdown', builtin: true, hiddenByDefault: true, order: 7 },
+  { id: 'b_id', key: 'id', label: 'Record ID', type: 'text', builtin: true, readonly: true, hiddenByDefault: true, order: 100 },
+  { id: 'b_created', key: 'created_at', label: 'Created At', type: 'date', builtin: true, readonly: true, hiddenByDefault: true, order: 101 },
+  { id: 'b_updated', key: 'updated_at', label: 'Updated At', type: 'date', builtin: true, readonly: true, hiddenByDefault: true, order: 102 },
 ];
 
 const BUILTIN_KEYS = new Set(BUILTIN_FIELDS.map((f) => f.key));
 export const isBuiltinKey = (k: string) => BUILTIN_KEYS.has(k);
 
+/**
+ * The fields of the Content Plan: the built-in fields, then the custom ones, then the built-in fields that come last.
+ * A stored row with `builtin: true` overrides a built-in field: its name, its choices and whether it starts hidden can
+ * change. Its key and type cannot (templates and storage depend on them).
+ */
 export function allFields(custom: FieldDef[]): FieldDef[] {
-  const cs = [...custom].sort((a, b) => a.order - b.order);
-  const early = BUILTIN_FIELDS.filter((f) => f.order < 50);
-  const late = BUILTIN_FIELDS.filter((f) => f.order >= 50);
-  return [...early, ...cs, ...late];
+  const overrides = new Map(custom.filter((f) => f.builtin).map((f) => [f.key, f] as const));
+  const builtins = BUILTIN_FIELDS.map((b) => {
+    const o = overrides.get(b.key);
+    return o ? { ...b, label: o.label || b.label, options: o.options ?? b.options, hiddenByDefault: o.hiddenByDefault ?? b.hiddenByDefault, defaultValue: o.defaultValue ?? b.defaultValue, order: o.order ?? b.order } : b;
+  });
+  const cs = custom.filter((f) => !f.builtin);
+  // one order for every field: a built-in field can sit between custom ones once it has been moved
+  return [...builtins, ...cs].sort((a, b) => a.order - b.order);
+}
+
+/** The default value of a field of the Content Plan (or '' when it has none). */
+export function defaultValueOf(custom: FieldDef[], key: string): string {
+  return allFields(custom).find((f) => f.key === key)?.defaultValue ?? '';
 }
 
 export function getValue(rec: ContentRecord, key: string): unknown {
@@ -81,12 +96,18 @@ export interface Coerced { value: unknown; error?: string }
 export function coerce(raw: unknown, f: FieldDef): Coerced {
   if (raw === undefined || raw === null) return { value: f.type === 'multiselect' ? [] : f.type === 'boolean' ? false : '' };
   const s = typeof raw === 'string' ? raw.trim() : raw;
+  // a formula ("=…") is kept as typed: it is calculated when the table is shown
+  if (typeof s === 'string' && s.startsWith('=') && ['number', 'currency', 'percent', 'formula'].includes(f.type)) return { value: s };
   switch (f.type) {
+    case 'formula': return { value: s === undefined || s === null ? '' : String(s) };
     case 'number': case 'currency': case 'percent': {
       if (s === '') return { value: '' };
+      if (f.type === 'currency') {
+        const amount = parseAmount(String(s));
+        return amount === null ? { value: '', error: `"${String(raw)}" is not an amount` } : { value: amount };
+      }
       let t = typeof s === 'string' ? s.replace(/[,\s]/g, '') : String(s);
       if (f.type === 'percent') t = t.replace(/%$/, '');
-      if (f.type === 'currency') t = t.replace(/^[^\d.+-]{1,3}/, ''); // "$", "Rp", "€"
       const n = t === '' ? NaN : Number(t);
       return Number.isFinite(n) ? { value: n } : { value: '', error: `"${String(raw)}" is not a number` };
     }

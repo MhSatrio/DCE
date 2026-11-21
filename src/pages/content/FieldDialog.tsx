@@ -1,16 +1,20 @@
 import { useMemo, useState } from 'react';
+import { Copy } from 'lucide-react';
 import { AUTO_TYPES, FIELD_TYPE_LABEL, fieldKeyFromLabel } from '../../db/fields';
 import type { FieldDef, FieldType } from '../../db/schema';
 import { allTables, createLinkPair, fieldsOf, isContent, saveFieldIn, tableName } from '../../db/tables';
 import { uid } from '../../engine/njs';
-import { Dialog } from '../../ui/kit';
-import { notify } from '../../ui/store';
+import { Dialog, IconBtn } from '../../ui/kit';
+import { copyText } from '../../ui/clipboard';
+import { notify, useStore } from '../../ui/store';
+import { recordsStore, tablesStore } from '../../db/stores';
 
 type Kind = FieldType | 'sync';
 
 const GROUPS: { title: string; kinds: Kind[] }[] = [
   { title: 'Text', kinds: ['text', 'longtext', 'markdown', 'email', 'phone', 'url'] },
   { title: 'Numbers', kinds: ['number', 'currency', 'percent', 'rating'] },
+  { title: 'Calculated', kinds: ['formula'] },
   { title: 'Choices', kinds: ['select', 'multiselect', 'boolean'] },
   { title: 'Dates', kinds: ['date', 'datetime', 'createdTime', 'modifiedTime'] },
   { title: 'Relations between tables', kinds: ['link', 'sync'] },
@@ -29,6 +33,10 @@ const KIND_HELP: Partial<Record<Kind, string>> = {
 };
 
 export function FieldDialog({ onClose, existing, table }: { onClose: () => void; existing?: FieldDef; table: string }) {
+  // the choices (tables, fields) follow the data while the dialog is open
+  useStore(tablesStore, (s) => s.tables);
+  useStore(tablesStore, (s) => s.fields);
+  useStore(recordsStore, (s) => s.fields);
   const [label, setLabel] = useState(existing?.label ?? '');
   const [kind, setKind] = useState<Kind>(existing?.sync ? 'sync' : existing?.type ?? 'text');
   const [options, setOptions] = useState((existing?.options ?? []).join(', '));
@@ -45,9 +53,20 @@ export function FieldDialog({ onClose, existing, table }: { onClose: () => void;
   const srcField = sourceFields.find((f) => f.key === source) ?? sourceFields[0];
 
   const locked = !!existing;
+  const [hiddenDefault, setHiddenDefault] = useState(!!existing?.hiddenByDefault);
+  const [defaultChoice, setDefaultChoice] = useState(existing?.defaultValue ?? '');
+  const keyShown = existing?.key ?? fieldKeyFromLabel(label || 'field', new Set(fieldsOf(table).map((f) => f.key)));
   const valid = label.trim().length > 0 && (kind !== 'sync' || (!!viaField && !!srcField)) && (kind !== 'link' || !!linkTable);
 
   const save = async () => {
+    if (existing?.builtin) {
+      // a built-in field keeps its key and type; only its name, its choices and its starting visibility change
+      const choices = options.split(',').map((x) => x.trim()).filter(Boolean);
+      const o: FieldDef = { ...existing, label: label.trim(), options: existing.type === 'select' || existing.type === 'multiselect' ? choices : existing.options, defaultValue: existing.type === 'select' ? (choices.includes(defaultChoice) ? defaultChoice : '') : existing.defaultValue, hiddenByDefault: hiddenDefault, builtin: true };
+      await saveFieldIn(table, o);
+      notify('success', `Field “${o.label}” updated.`);
+      onClose(); return;
+    }
     const taken = new Set(fieldsOf(table).map((f) => f.key));
     const order = existing?.order ?? Math.max(10, ...fieldsOf(table).filter((f) => !f.builtin || f.order < 50).map((f) => f.order + 1));
     if (!existing && kind === 'link') {
@@ -66,7 +85,8 @@ export function FieldDialog({ onClose, existing, table }: { onClose: () => void;
         relationTo: kind === 'relation' ? relTo : kind === 'image' ? 'assets' : undefined,
         currency: kind === 'currency' ? currency : undefined, ratingMax: kind === 'rating' ? Math.max(1, Math.min(10, ratingMax)) : undefined,
         readonly: AUTO_TYPES.includes(kind as FieldType) || undefined,
-        linkTable: existing?.linkTable, inverseKey: existing?.inverseKey,
+        linkTable: existing?.linkTable, inverseKey: existing?.inverseKey, hiddenByDefault: hiddenDefault || undefined,
+        defaultValue: kind === 'select' && defaultChoice && options.split(',').map((x) => x.trim()).includes(defaultChoice) ? defaultChoice : undefined,
       };
     }
     await saveFieldIn(table, f);
@@ -75,10 +95,11 @@ export function FieldDialog({ onClose, existing, table }: { onClose: () => void;
   };
 
   return (
-    <Dialog title={existing ? 'Edit field' : 'Add a field'} onClose={onClose} size="mid" foot={<>
+    <Dialog title={existing?.builtin ? 'Edit built-in field' : existing ? 'Edit field' : 'Add a field'} onClose={onClose} size="mid" foot={<>
       <button className="btn" onClick={onClose}>Cancel</button>
       <button className="btn primary" disabled={!valid} onClick={save}>{existing ? 'Save' : 'Create field'}</button>
     </>}>
+      {existing?.builtin && <div className="muted small">Built-in field: its key (<code>{keyShown}</code>) and its type stay as they are. Its name and its choices can change, and templates and the batch use the new name at once.</div>}
       <label className="fld"><span>Name</span><input value={label} onChange={(e) => setLabel(e.target.value)} placeholder="e.g. Warranty (years)" autoFocus /></label>
       <div className="fld"><span>Field type</span>
         <div className="col" style={{ gap: 6 }} role="radiogroup" aria-label="Field type">
@@ -96,6 +117,7 @@ export function FieldDialog({ onClose, existing, table }: { onClose: () => void;
       </div>
 
       {(kind === 'select' || kind === 'multiselect') && <label className="fld"><span>Options (comma separated)</span><input value={options} onChange={(e) => setOptions(e.target.value)} placeholder="Red, Green, Blue" /></label>}
+      {kind === 'select' && <label className="fld"><span>Default for new records and imports</span><select aria-label="Default choice" value={defaultChoice} onChange={(e) => setDefaultChoice(e.target.value)}><option value="">(none)</option>{options.split(',').map((x) => x.trim()).filter(Boolean).map((o) => <option key={o} value={o}>{o}</option>)}</select></label>}
       {kind === 'currency' && <label className="fld"><span>Currency symbol</span><input value={currency} onChange={(e) => setCurrency(e.target.value)} style={{ width: 90 }} aria-label="Currency symbol" /></label>}
       {kind === 'rating' && <label className="fld"><span>Maximum stars</span><input type="number" min={1} max={10} value={ratingMax} onChange={(e) => setRatingMax(Number(e.target.value))} style={{ width: 90 }} aria-label="Maximum stars" /></label>}
       {kind === 'relation' && <label className="fld"><span>Links to</span><select value={relTo} onChange={(e) => setRelTo(e.target.value as typeof relTo)}><option value="templates">Templates</option></select></label>}
@@ -123,7 +145,9 @@ export function FieldDialog({ onClose, existing, table }: { onClose: () => void;
           <div className="muted small">If several records are linked, the first one is mirrored. Editing this field here changes the source field in the other table.</div>
         </>
       ))}
-      {!locked && <div className="muted small">{isContent(table) ? <>Template binding key: <code>{`{{content.${fieldKeyFromLabel(label || 'field', new Set(fieldsOf(table).map((f) => f.key)))}}}`}</code></> : null}</div>}
+      <label className="chk"><input type="checkbox" checked={hiddenDefault} onChange={(e) => setHiddenDefault(e.target.checked)} /> Hidden when the table opens (it can still be shown from the Fields panel)</label>
+      <div className="row small muted" style={{ gap: 6 }}>Template binding key: <code>{`{{content.${keyShown}}}`}</code>
+        <IconBtn icon={<Copy size={13} />} label="Copy the template binding key" onClick={() => void copyText(`{{content.${keyShown}}}`, 'Binding key copied.')} /></div>
     </Dialog>
   );
 }

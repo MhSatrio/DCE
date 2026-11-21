@@ -216,7 +216,7 @@ async function sendToBuffer(text: string, imageUrl: string | undefined, cfg: Pip
     if (/INSTAGRAM/i.test(key) && !imageUrl) { ch.skipped = 'Instagram needs an image and the page has none.'; continue; }
     const cred = await resolveBufferCredentials(cfg.connectionId, key);
     if ('error' in cred) { ch.error = cred.error; continue; }
-    const r = await createPost(relay, cred.apiKey, { text, channelId: cred.channelId, imageUrl, mode: dueAt ? 'scheduled' : 'queue', dueAt });
+    const r = await createPost(relay, cred.apiKey, { text, channelId: cred.channelId, imageUrls: imageUrl ? [imageUrl] : undefined, mode: dueAt ? 'scheduled' : 'queue', dueAt, instagramType: /INSTAGRAM/i.test(key) ? 'post' : undefined });
     if (r.ok) { ch.postId = r.postId; ch.dueAt = r.dueAt ?? dueAt; } else { ch.error = r.error ?? 'Buffer error'; if (/rejected the API key|unauthori[sz]ed|token/i.test(ch.error)) authFailed = true; }
   }
   return { channels, sent: channels.filter((c) => c.postId).length, authFailed };

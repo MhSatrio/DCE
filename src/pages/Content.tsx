@@ -1,20 +1,26 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useLiveQuery } from 'dexie-react-hooks';
-import { ClipboardPaste, Columns3, Copy, Download, FilePlus2, FileUp, Filter, FlaskConical, Maximize2, Pencil, Plus, Search, Trash2, X } from 'lucide-react';
+import { ChevronDown, ChevronLeft, ChevronRight, ChevronUp, ClipboardPaste, Columns3, Copy, Download, FilePlus2, FileUp, Filter, FlaskConical, Maximize2, Pencil, Plus, Redo2, Search, Sigma, Trash2, Undo2, X, Zap } from 'lucide-react';
 import { toCsv } from '../db/csv';
-import { coerce, displayValue, FIELD_TYPE_LABEL, getValue, STATUSES } from '../db/fields';
+import { toXlsx } from '../db/xlsx';
+import { coerce, displayValue, FIELD_TYPE_LABEL, getValue } from '../db/fields';
+import { describeField, describeTable } from '../db/describe';
 import { applyFilter, emptyFilter, searchRecords, sortRecords, type FilterGroup } from '../db/filter';
 import { newRecord } from '../db/repo';
-import { CONTENT_TABLE, createRows, deleteFieldIn, deleteRows, isContent, newRow, rowName, tableName, updateRow, updateRowsWith, useNameMaps, useTableData, writeRows } from '../db/tables';
+import { CONTENT_TABLE, createRows, deleteFieldIn, deleteRows, isContent, moveFieldIn, moveRowIn, newRow, rowName, tableName, updateRow, updateRowsWith, useNameMaps, useTableData, writeRows } from '../db/tables';
 import { LinkPicker } from '../ui/LinkPicker';
-import { deleteTable, renameTable } from '../db/tables';
+import { deleteTable, historyStore, redoChange, renameTable, undoChange } from '../db/tables';
+import { FormulaErr, isFormulaCell, numberText, TableEvaluator, type Val } from '../db/formula';
+import { FormulaDialog } from './content/FormulaDialog';
 import { generateDemoRecords } from '../db/seed';
-import { buildExportRows } from './content/exportRows';
+import { buildExportRows, exportKinds } from './content/exportRows';
 import { db, type ContentRecord, type FieldDef } from '../db/schema';
-import { dependentsFor } from '../db/tables';
+import { dependentsFor, fieldsOf, masterKeyOf, setMaster } from '../db/tables';
+import { CAROUSEL_NO } from '../db/carousel';
 import { download, Dialog, Empty, IconBtn, go } from '../ui/kit';
 import { FilterBuilder } from '../ui/FilterBuilder';
 import { useDebounced, useLocalState } from '../ui/hooks';
+import { copyText } from '../ui/clipboard';
 import { confirmAction, notify, useStore } from '../ui/store';
 import { AssetThumb } from '../ui/Thumb';
 import { VirtualGrid, type CellRange, type GridCol } from '../ui/VirtualGrid';
@@ -23,12 +29,26 @@ import { FieldDialog } from './content/FieldDialog';
 import { ImportWizard } from './content/ImportWizard';
 import { RecordDrawer } from './content/RecordDrawer';
 import { copyRows, parseTsv, planPaste, toTsv, type Lookups } from './content/gridClipboard';
+import { fillGrid } from './content/fill';
 
-const DEFAULT_HIDDEN = ['content', 'id', 'created_at', 'updated_at'];
 const DEFAULT_W: Record<string, number> = { title: 260, status: 110, publish_date: 120, image_asset: 170, template_ref: 170, tags: 170, slug: 190, description: 280, specs: 260, id: 280, created_at: 160, updated_at: 160, content: 240 };
 
-function statusChip(s: string) {
-  const cls = s === 'Approved' || s === 'Published' ? 'ok' : s === 'In review' ? 'warn' : '';
+/** A formula's result as the cell shows it: numbers (money with its symbol), TRUE / FALSE, or the error code. */
+function formulaBody(v: Val, f: FieldDef): React.ReactNode {
+  if (v instanceof FormulaErr) return <span className="txt" title={v.message || v.code} style={{ color: 'var(--danger)' }}>{v.code}</span>;
+  if (v === null) return null;
+  if (typeof v === 'number') {
+    const text = f.type === 'currency' ? `${f.currency ?? '$'}${v.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}` : numberText(v);
+    return <span className="txt" style={{ width: '100%', textAlign: 'right' }}>{text}</span>;
+  }
+  if (typeof v === 'boolean') return <span className="txt">{v ? 'TRUE' : 'FALSE'}</span>;
+  return <span className="txt">{Array.isArray(v) ? '' : String(v)}</span>;
+}
+
+/** A chip for a choice. The colour follows the choice's position in its field, so no choice name is fixed in the code. */
+const CHIP_TONES = ['', 'blue', 'ok', 'warn'];
+function statusChip(s: string, options: string[]) {
+  const cls = CHIP_TONES[Math.max(0, options.indexOf(s)) % CHIP_TONES.length];
   return <span className={`chip ${cls}`}>{s}</span>;
 }
 
@@ -51,7 +71,7 @@ function BulkEdit({ ids, fields, onClose, tableId }: { ids: string[]; fields: Fi
     <Dialog title={`Bulk update ${ids.length} record${ids.length === 1 ? '' : 's'}`} onClose={onClose} foot={<><button className="btn" onClick={onClose}>Cancel</button><button className="btn primary" onClick={apply} disabled={!f}>Apply</button></>}>
       <label className="fld"><span>Field</span><select value={key} onChange={(e) => { setKey(e.target.value); setValue(''); }}>{editable.map((x) => <option key={x.key} value={x.key}>{x.label} ({FIELD_TYPE_LABEL[x.type]})</option>)}</select></label>
       <label className="fld"><span>New value</span>
-        {f?.key === 'status' || f?.type === 'select' ? <select value={value} onChange={(e) => setValue(e.target.value)}><option value="">(empty)</option>{(f.key === 'status' ? STATUSES : f.options ?? []).map((o) => <option key={o}>{o}</option>)}</select>
+        {f?.key === 'status' || f?.type === 'select' ? <select value={value} onChange={(e) => setValue(e.target.value)}><option value="">(empty)</option>{(f.options ?? []).map((o) => <option key={o}>{o}</option>)}</select>
           : f?.type === 'relation' ? <select value={value} onChange={(e) => setValue(e.target.value)}><option value="">(none)</option>{(templates ?? []).map((t) => <option key={t.id} value={t.id}>{t.name}</option>)}</select>
           : f?.type === 'image' ? <div className="row"><input value={value} onChange={(e) => setValue(e.target.value)} placeholder="asset id or URL" className="grow" /><button className="btn" onClick={() => setPicker(true)}>Choose…</button></div>
           : f?.type === 'boolean' ? <select value={value} onChange={(e) => setValue(e.target.value)}><option value="true">true</option><option value="false">false</option></select>
@@ -63,10 +83,33 @@ function BulkEdit({ ids, fields, onClose, tableId }: { ids: string[]; fields: Fi
   );
 }
 
+/** "Page N of <carousel name>": the name is the carousel record's Master Field, so a rename shows here at once. */
+function carouselPageText(rec: ContentRecord, f: FieldDef, names: Map<string, Map<string, string>>): string {
+  const ids = Array.isArray(rec.data[f.key]) ? (rec.data[f.key] as string[]) : [];
+  if (ids.length === 0) return '';
+  const name = names.get(f.linkTable ?? '')?.get(ids[0]) ?? '(carousel)';
+  return `Page ${rec.data[CAROUSEL_NO] ?? '?'} of ${name}`;
+}
+
+/** The lightning mark of a synced field, next to its name. */
+function SyncMark() {
+  return <span aria-label="Synced field" className="syncmark" style={{ display: 'inline-flex', color: '#b7791f' }}><Zap size={12} /></span>;
+}
+
+/** Where a synced field gets its value: "Table name" and "Field name" of the source (what the tooltip says). */
+function syncTarget(table: string, f: FieldDef): { table: string; field: string } | null {
+  if (!f.sync) return null;
+  const via = fieldsOf(table).find((x) => x.key === f.sync!.via);
+  if (!via?.linkTable) return null;
+  const src = fieldsOf(via.linkTable).find((x) => x.key === f.sync!.source);
+  return { table: tableName(via.linkTable), field: src?.label ?? f.sync.source };
+}
+
 export default function ContentPage({ openId, tableId = CONTENT_TABLE }: { openId?: string; tableId?: string }) {
   const { records, fields, loaded } = useTableData(tableId);
   const isC = isContent(tableId);
   const tname = tableName(tableId);
+  const linkName = (t: string) => tableName(t);
   const customFields = useMemo(() => fields.filter((f) => !f.builtin), [fields]);
   const mk = (partial: Partial<ContentRecord> = {}) => (isC ? newRecord(partial) : newRow(tableId, partial));
   const linkTables = useMemo(() => [...new Set(fields.filter((f) => f.type === 'link' && f.linkTable).map((f) => f.linkTable!))], [fields]);
@@ -79,7 +122,8 @@ export default function ContentPage({ openId, tableId = CONTENT_TABLE }: { openI
   const [filter, setFilter] = useState<FilterGroup>(emptyFilter());
   const [sort, setSort] = useState<{ key: string; dir: 'asc' | 'desc' } | null>(isC ? { key: 'created_at', dir: 'desc' } : null);
   const [widths, setWidths] = useLocalState<Record<string, number>>(`dce.cols.${tableId}`, {});
-  const [hidden, setHidden] = useLocalState<string[]>(`dce.hidden.${tableId}`, isC ? DEFAULT_HIDDEN : []);
+  // the fields that start hidden are marked on the field itself (built-in: content, id, dates), not listed here
+  const [hidden, setHidden] = useLocalState<string[]>(`dce.hidden.${tableId}`, fields.filter((f) => f.hiddenByDefault).map((f) => f.key));
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [active, setActive] = useState<string | null>(openId ?? null);
   const [editing, setEditing] = useState<{ id: string; key: string } | null>(null);
@@ -96,6 +140,10 @@ export default function ContentPage({ openId, tableId = CONTENT_TABLE }: { openI
   const [anchor, setAnchor] = useState<{ row: number; col: number } | null>(null);
   const [range, setRange] = useState<CellRange | null>(null);
   const dragging = useRef(false);
+  // the fill handle: the selection it started from, the rows it would add, and whether Shift / Ctrl counts numbers up
+  const fillSrc = useRef<CellRange | null>(null);
+  const [fillPreview, setFillPreview] = useState<CellRange | null>(null);
+  const [fillSeriesNow, setFillSeriesNow] = useState(false);
   const [menu, setMenu] = useState<{ x: number; y: number } | null>(null);
 
   useEffect(() => { if (openId) setActive(openId); }, [openId]);
@@ -108,8 +156,21 @@ export default function ContentPage({ openId, tableId = CONTENT_TABLE }: { openI
 
   const view = useMemo(() => sortRecords(applyFilter(searchRecords(records, dq), filter), sort?.key ?? null, sort?.dir ?? 'asc'), [records, dq, filter, sort]);
   const visibleFields = fields.filter((f) => !hidden.includes(f.key));
-  const cols: GridCol[] = visibleFields.map((f) => ({ key: f.key, title: f.label, width: widths[f.key] ?? DEFAULT_W[f.key] ?? 150, align: f.type === 'number' ? 'right' : undefined }));
+  // the Master Field comes first and stays in view while the grid scrolls sideways; a synced field shows its source
+  const masterKey = masterKeyOf(tableId);
+  const orderedFields = [...visibleFields].sort((a, b) => (a.key === masterKey ? -1 : b.key === masterKey ? 1 : 0));
+  const cols: GridCol[] = orderedFields.map((f) => {
+    const sync = f.sync ? syncTarget(tableId, f) : null;
+    return {
+      key: f.key, title: f.label, width: widths[f.key] ?? DEFAULT_W[f.key] ?? 150, align: f.type === 'number' ? 'right' : undefined,
+      frozen: f.key === masterKey,
+      badge: sync ? <SyncMark /> : f.key === masterKey ? <span className="chip blue" style={{ fontSize: 10 }}>master</span> : undefined,
+      tip: sync ? `Linked to: ${sync.table} → ${sync.field}` : f.key === masterKey ? 'Master Field: names each record, stays in view while scrolling' : undefined,
+    };
+  });
   const activeFilters = filter.conditions.length;
+  // rows can be moved only in the table's own order (no sort, no filter, no search)
+  const canMoveRows = !sort && !activeFilters && !dq;
 
   useEffect(() => { setRange(null); setCur(null); setAnchor(null); }, [dq, filter, sort?.key, sort?.dir]);
   useEffect(() => {
@@ -148,6 +209,27 @@ export default function ContentPage({ openId, tableId = CONTENT_TABLE }: { openI
     setTimeout(() => document.querySelector<HTMLElement>('.vgrid-scroll')?.focus(), 0);
   };
 
+  // undo / redo of table changes (Ctrl+Z, Ctrl+Shift+Z / Ctrl+Y). Typing in a field keeps the browser's own undo.
+  const hist = useStore(historyStore, (s) => s);
+  const doUndo = async () => { const l = await undoChange(); if (l) notify('info', `Undone: ${l.toLowerCase()}.`); };
+  const doRedo = async () => { const l = await redoChange(); if (l) notify('info', `Redone: ${l.toLowerCase()}.`); };
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      const t = e.target as HTMLElement | null;
+      if (t && (/^(INPUT|TEXTAREA|SELECT)$/.test(t.tagName) || t.isContentEditable)) return;
+      if (!(e.ctrlKey || e.metaKey)) return;
+      const k = e.key.toLowerCase();
+      if (k === 'z' && !e.shiftKey) { e.preventDefault(); void undoChange().then((l) => { if (l) notify('info', `Undone: ${l.toLowerCase()}.`); }); }
+      else if (k === 'y' || (k === 'z' && e.shiftKey)) { e.preventDefault(); void redoChange().then((l) => { if (l) notify('info', `Redone: ${l.toLowerCase()}.`); }); }
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, []);
+
+  // formulas of this table, calculated on demand for the rows shown
+  const evaluator = useMemo(() => new TableEvaluator(fields, records), [fields, records]);
+  const [formulaFor, setFormulaFor] = useState<{ id: string; key: string; text?: string } | null>(null);
+
   const renderCell = useCallback((rec: ContentRecord, col: GridCol) => {
     const f = fields.find((x) => x.key === col.key)!;
     if (!f) return null;
@@ -162,15 +244,15 @@ export default function ContentPage({ openId, tableId = CONTENT_TABLE }: { openI
     };
     if (isEd) {
       if (f.type === 'select') {
-        const opts = f.key === 'status' ? STATUSES : f.options ?? [];
+        const opts = f.options ?? [];
         return <select autoFocus value={String(v ?? '')} onChange={(e) => void commit(rec, f, e.target.value)} onBlur={() => setEditing(null)} onKeyDown={(e) => { if (e.key === 'Escape') { setEditing(null); afterEdit(0); } }} aria-label={f.label}><option value="">—</option>{[...opts, ...(v && !opts.includes(String(v)) ? [String(v)] : [])].map((o) => <option key={o}>{o}</option>)}</select>;
       }
       if (f.type === 'relation') {
         return <select autoFocus value={String(v ?? '')} onChange={(e) => void commit(rec, f, e.target.value)} onBlur={() => setEditing(null)} onKeyDown={(e) => { if (e.key === 'Escape') { setEditing(null); afterEdit(0); } }} aria-label={f.label}><option value="">—</option>{[...(templateNames ?? new Map())].map(([id, n]) => <option key={id} value={id}>{n}</option>)}</select>;
       }
-      return (
+      const inline = (
         <input
-          autoFocus aria-label={f.label} defaultValue={displayValue(v)} type={f.type === 'date' ? 'date' : f.type === 'datetime' ? 'datetime-local' : ['number', 'currency', 'percent', 'rating'].includes(f.type) ? 'number' : 'text'}
+          autoFocus aria-label={f.label} defaultValue={displayValue(v)} type={f.type === 'date' ? 'date' : f.type === 'datetime' ? 'datetime-local' : f.type === 'rating' ? 'number' : 'text'}
           onKeyDown={(e) => {
             if (e.key === 'Enter') { void commit(rec, f, (e.target as HTMLInputElement).value); afterEdit(1); }
             else if (e.key === 'Tab') { e.preventDefault(); void commit(rec, f, (e.target as HTMLInputElement).value); afterEdit(0, e.shiftKey ? -1 : 1); }
@@ -179,12 +261,26 @@ export default function ContentPage({ openId, tableId = CONTENT_TABLE }: { openI
           onBlur={(e) => void commit(rec, f, e.target.value)}
         />
       );
+      if (f.type !== 'formula' && f.type !== 'currency') return inline;
+      return (
+        <div className="row" style={{ width: '100%', height: '100%', gap: 0, minWidth: 0 }}>
+          {inline}
+          <button className="rowopen" style={{ opacity: 1, width: 22 }} aria-label={`Open the large editor for ${f.label}`} title="Open the large editor (Ctrl+Enter saves there)"
+            onMouseDown={(e) => e.preventDefault()}
+            onClick={(e) => { const cur = (e.currentTarget.parentElement?.querySelector('input') as HTMLInputElement | null)?.value ?? displayValue(v); setEditing(null); setFormulaFor({ id: rec.id, key: f.key, text: cur }); }}>
+            <Maximize2 size={12} />
+          </button>
+        </div>
+      );
     }
     let body: React.ReactNode;
-    switch (f.type) {
+    // a formula, or a money value typed as a formula: shown as its result
+    const computed = isFormulaCell(f.type, v) ? evaluator.valueOf(rec.id, f.key) : undefined;
+    if (computed !== undefined) body = formulaBody(computed, f);
+    else switch (f.type) {
       case 'boolean': body = <input type="checkbox" aria-label={f.label} checked={!!v} onChange={(e) => void commit(rec, f, String(e.target.checked))} />; break;
       case 'image': body = v ? <span className="row" style={{ gap: 6, minWidth: 0 }}><AssetThumb id={String(v)} size={24} /><span className="txt">{/^https?:/i.test(String(v)) ? 'remote image' : assetNames?.get(String(v)) ?? String(v).slice(0, 8)}</span></span> : null; break;
-      case 'link': body = <span className="row" style={{ gap: 3, overflow: 'hidden' }}>{(Array.isArray(v) ? v : []).map((id) => <span className="chip blue" key={String(id)} title={names.get(f.linkTable ?? '')?.get(String(id))}>{names.get(f.linkTable ?? '')?.get(String(id)) ?? '(deleted)'}</span>)}</span>; break;
+      case 'link': body = f.carouselPage ? <span className="small" aria-label="Carousel page">{carouselPageText(rec, f, names)}</span> : <span className="row" style={{ gap: 3, overflow: 'hidden' }}>{(Array.isArray(v) ? v : []).map((id) => <span className="chip blue" key={String(id)} title={names.get(f.linkTable ?? '')?.get(String(id))}>{names.get(f.linkTable ?? '')?.get(String(id)) ?? '(deleted)'}</span>)}</span>; break;
       case 'rating': { const n = Number(v) || 0; body = <span style={{ color: '#d49a00', letterSpacing: 1 }} aria-label={`${n} of ${f.ratingMax ?? 5}`}>{'★'.repeat(n)}<span style={{ color: '#cbd5e1' }}>{'★'.repeat(Math.max(0, (f.ratingMax ?? 5) - n))}</span></span>; break; }
       case 'currency': body = <span className="txt">{v === '' || v === undefined ? '' : `${f.currency ?? '$'}${Number(v).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`}</span>; break;
       case 'percent': body = <span className="txt">{v === '' || v === undefined ? '' : `${v}%`}</span>; break;
@@ -194,12 +290,12 @@ export default function ContentPage({ openId, tableId = CONTENT_TABLE }: { openI
       case 'datetime': case 'createdTime': case 'modifiedTime': body = <span className="txt">{v ? new Date(String(v)).toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' }) : ''}</span>; break;
       case 'relation': body = v ? <span className="txt">{templateNames?.get(String(v)) ?? '(missing)'}</span> : null; break;
       case 'multiselect': body = <span className="row" style={{ gap: 3, overflow: 'hidden' }}>{(Array.isArray(v) ? v : []).map((t) => <span className="chip blue" key={String(t)}>{String(t)}</span>)}</span>; break;
-      case 'select': body = f.key === 'status' && v ? statusChip(String(v)) : <span className="txt">{displayValue(v)}</span>; break;
+      case 'select': body = v ? statusChip(String(v), f.options ?? []) : <span className="txt">{displayValue(v)}</span>; break;
       case 'date': body = <span className="txt">{f.readonly && v ? new Date(String(v)).toLocaleDateString() : displayValue(v)}</span>; break;
       default: body = <span className="txt" title={displayValue(v)}>{displayValue(v).replace(/\s+/g, ' ')}</span>;
     }
     return <div style={{ display: 'flex', alignItems: 'center', width: '100%', height: '100%', minWidth: 0 }} onDoubleClick={startEdit}>{body}</div>;
-  }, [fields, editing, assetNames, templateNames, commit, view.length, visibleFields.length, names]);
+  }, [fields, editing, assetNames, templateNames, commit, view.length, visibleFields.length, names, evaluator]);
 
   const onToggleSelect = (id: string, index: number, shift: boolean) => {
     setSelected((prev) => {
@@ -222,17 +318,40 @@ export default function ContentPage({ openId, tableId = CONTENT_TABLE }: { openI
     return view.filter((r) => selected.has(r.id));
   };
 
-  const doCopy = (): boolean => {
+  const doCopy = (whole = false): boolean => {
     let rows: ContentRecord[], fs: FieldDef[];
     if (range) { rows = view.slice(range.r1, range.r2 + 1); fs = visibleFields.slice(range.c1, range.c2 + 1); }
     else if (selected.size) { rows = view.filter((r) => selected.has(r.id)); fs = visibleFields; }
+    else if (whole) { rows = view; fs = visibleFields; }
     else return false;
-    const text = toTsv(copyRows(rows, fs, lookups));
+    // a formula copies its result, not its text: pasting elsewhere gives the number, as in a spreadsheet
+    const text = toTsv(copyRows(rows, fs, lookups, (r, f) => (isFormulaCell(f.type, getValue(r, f.key)) ? evaluator.textOf(r.id, f.key) : undefined)));
     lastCopy.current = text;
     notify('info', `Copied ${rows.length} row${rows.length === 1 ? '' : 's'} × ${fs.length} column${fs.length === 1 ? '' : 's'} — paste into a spreadsheet, or here.`);
     return true;
   };
   const lastCopy = useRef('');
+  /** Copies the selected rows, or with nothing selected the whole table, as spreadsheet text. */
+  const copyTable = async (whole: boolean) => {
+    if (!doCopy(whole)) return;
+    try { await navigator.clipboard.writeText(lastCopy.current); } catch { notify('warn', 'The browser blocked clipboard access.'); }
+  };
+  // Ctrl+C while the focus is on a checkbox (the select-all box) or on the page copies the selected rows too
+  const doCopyRef = useRef(doCopy);
+  doCopyRef.current = doCopy;
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (!(e.ctrlKey || e.metaKey) || e.shiftKey || e.altKey || e.key.toLowerCase() !== 'c') return;
+      const t = e.target as HTMLElement | null;
+      if (t && /^(INPUT|TEXTAREA|SELECT)$/.test(t.tagName) && (t as HTMLInputElement).type !== 'checkbox') return;
+      if (!selected.size && !range) return;   // nothing chosen: the browser’s own copy
+      if (!doCopyRef.current()) return;
+      e.preventDefault();
+      void navigator.clipboard.writeText(lastCopy.current).catch(() => notify('warn', 'The browser blocked clipboard access.'));
+    };
+    document.addEventListener('keydown', onKey);
+    return () => document.removeEventListener('keydown', onKey);
+  }, [selected, range]);
 
   const doPaste = async (text: string) => {
     if (!text.trim() && text !== '') return;
@@ -266,8 +385,43 @@ export default function ContentPage({ openId, tableId = CONTENT_TABLE }: { openI
     else { setCur(n); setAnchor(n); setRange(norm(n, n)); }
   };
 
+  // ---- fill handle (spreadsheet fill down): repeats the selection in the rows below it; see content/fill.ts
+  const fillTo = (src: CellRange, row: number): CellRange => ({ r1: src.r1, r2: Math.max(src.r2, row), c1: src.c1, c2: src.c2 });
+  const doFill = async (src: CellRange, toRow: number, series: boolean) => {
+    const block = copyRows(view.slice(src.r1, src.r2 + 1), visibleFields.slice(src.c1, src.c2 + 1), lookups);
+    const grid = fillGrid(block, toRow - src.r2, series);
+    const plan = planPaste({ grid, startRow: src.r2 + 1, startCol: src.c1, view, fields: visibleFields, lookups, make: mk });
+    if (plan.created.length && !(await confirmAction(`Create ${plan.created.length} new record${plan.created.length === 1 ? '' : 's'}?`, `Filling down past the last of the ${view.length} visible row${view.length === 1 ? '' : 's'} adds ${plan.created.length} new record${plan.created.length === 1 ? '' : 's'}.`, 'Fill and create', false))) return;
+    if (!plan.cells) { notify('warn', plan.skipped[0] ? `Nothing filled — ${plan.skipped[0].field}: ${plan.skipped[0].message}` : 'Nothing to fill: the columns are read-only.'); return; }
+    if (!(await writeRows(tableId, plan.updated, plan.created, { prev: new Map(records.map((r) => [r.id, r])) }))) return;
+    setRange({ r1: src.r1, r2: toRow, c1: src.c1, c2: src.c2 });
+    const bits = [`Filled ${plan.cells} cell${plan.cells === 1 ? '' : 's'}${series ? ' counting on' : ''}`];
+    if (plan.created.length) bits.push(`${plan.created.length} new record${plan.created.length === 1 ? '' : 's'}`);
+    if (plan.skipped.length) bits.push(`${plan.skipped.length} value${plan.skipped.length === 1 ? '' : 's'} rejected, e.g. ${plan.skipped[0].field}: ${plan.skipped[0].message}`);
+    notify(plan.skipped.length ? 'warn' : 'success', bits.join(' · ') + '.', plan.skipped.length ? 9000 : 4500);
+  };
+  const fillInfo = fillPreview && range && fillPreview.r2 > range.r2
+    ? { added: fillPreview.r2 - range.r2, created: Math.max(0, fillPreview.r2 - Math.max(range.r2, view.length - 1)) }
+    : null;
+
   const cellApi = {
-    range, active: cur,
+    range, active: cur, fillPreview,
+    onFillStart: () => { if (range) { fillSrc.current = range; setFillPreview(range); } },
+    onFillDrag: (row: number, series: boolean) => {
+      const src = fillSrc.current;
+      if (!src) return;
+      setFillPreview(fillTo(src, row));
+      setFillSeriesNow(series);
+    },
+    onFillEnd: (row: number, series: boolean) => {
+      const src = fillSrc.current;
+      fillSrc.current = null;
+      setFillPreview(null);
+      setFillSeriesNow(false);
+      if (!src) return;
+      const to = fillTo(src, row);
+      if (to.r2 > src.r2) void doFill(src, to.r2, series);
+    },
     onDown: (row: number, col: number, e: React.MouseEvent) => {
       gridFocus();
       setMenu(null);
@@ -331,13 +485,16 @@ export default function ContentPage({ openId, tableId = CONTENT_TABLE }: { openI
     }
   };
 
-  const exportData = (kind: 'csv' | 'json') => {
+  const exportData = (kind: 'csv' | 'json' | 'xlsx') => {
     const rows = selected.size ? view.filter((r) => selected.has(r.id)) : view;
     const ts = new Date().toISOString().slice(0, 10);
     const base = `${tname.toLowerCase().replace(/[^a-z0-9]+/g, '-')}-${ts}`;
     if (kind === 'csv') {
       const lines = buildExportRows(rows, fields, names);
       download(new Blob(['\ufeff' + toCsv(lines)], { type: 'text/csv;charset=utf-8' }), `${base}.csv`);
+    } else if (kind === 'xlsx') {
+      const lines = buildExportRows(rows, fields, names);
+      download(new Blob([toXlsx(lines, { sheet: tname, kinds: exportKinds(fields) }) as BlobPart], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' }), `${base}.xlsx`);
     } else {
       const payload = { format: 'vierapparatus-dce-records', version: 1, table: tname, fields: customFields, records: rows.map(({ sample: _s, ...r }) => r) };
       download(new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' }), `${base}.json`);
@@ -348,7 +505,7 @@ export default function ContentPage({ openId, tableId = CONTENT_TABLE }: { openI
 
   const add = async () => {
     const r = mk(isC ? { title: 'New record' } : {});
-    if (await createRows(tableId, [r])) { if (isC) setSort({ key: 'created_at', dir: 'desc' }); notify('success', isC ? 'Record created — double-click its title to rename it, or use the ⤢ button to open details.' : 'Row added — type in a cell (double-click or Enter), or paste from a spreadsheet.'); }
+    if (await createRows(tableId, [r], false, isC ? 'Add record' : 'Add row')) { if (isC) setSort({ key: 'created_at', dir: 'desc' }); notify('success', isC ? 'Record created — double-click its title to rename it, or use the ⤢ button to open details.' : 'Row added — type in a cell (double-click or Enter), or paste from a spreadsheet.'); }
   };
 
   const removeSelected = async () => {
@@ -369,20 +526,21 @@ export default function ContentPage({ openId, tableId = CONTENT_TABLE }: { openI
     <div className="page">
       <div className="page-head">
         <h1>{tname}</h1>
-        {!isC && <>
-          <IconBtn icon={<Pencil size={15} />} label="Rename table" onClick={() => setRenaming(tname)} />
-          <IconBtn icon={<Trash2 size={15} />} label="Delete table" onClick={async () => { if (await confirmAction(`Delete table “${tname}”?`, `${records.length} row${records.length === 1 ? '' : 's'}, its fields and automations are permanently removed. Link fields in other tables that point here are removed too.`, 'Delete table')) { await deleteTable(tableId); notify('success', 'Table deleted.'); go('#/content'); } }} />
-        </>}
+        <IconBtn icon={<Pencil size={15} />} label="Rename table" onClick={() => setRenaming(tname)} />
+        {!isC && <IconBtn icon={<Trash2 size={15} />} label="Delete table" onClick={async () => { if (await confirmAction(`Delete table “${tname}”?`, `${records.length} row${records.length === 1 ? '' : 's'}, its fields and automations are permanently removed. Link fields in other tables that point here are removed too.`, 'Delete table')) { await deleteTable(tableId); notify('success', 'Table deleted.'); go('#/content'); } }} />}
         <span className="muted">{records.length.toLocaleString()} {isC ? 'record' : 'row'}{records.length === 1 ? '' : 's'}</span>
         <span className="grow" />
+        <button className="btn" disabled={!hist.undo} onClick={() => void doUndo()} title={hist.undo ? `Undo: ${hist.undo} (Ctrl+Z)` : 'Nothing to undo'} aria-label="Undo"><Undo2 size={15} /> Undo</button>
+        <button className="btn" disabled={!hist.redo} onClick={() => void doRedo()} title={hist.redo ? `Redo: ${hist.redo} (Ctrl+Shift+Z)` : 'Nothing to redo'} aria-label="Redo"><Redo2 size={15} /> Redo</button>
         <button className="btn primary" onClick={add}><Plus size={15} /> {isC ? 'New record' : 'New row'}</button>
         {isC && <button className="btn" onClick={() => setDlg('import')}><FileUp size={15} /> Import</button>}
         <div style={{ position: 'relative' }}>
+          <button className="btn" onClick={() => void copyTable(selected.size === 0 && !range)} title="Copy the selected rows, or the whole table when nothing is selected (paste into a spreadsheet)"><Copy size={15} /> {selected.size ? `Copy ${selected.size}` : 'Copy table'}</button>
           <button className="btn" onClick={() => setPanel(panel === 'export' ? null : 'export')} aria-expanded={panel === 'export'}><Download size={15} /> Export</button>
           {panel === 'export' && (
             <div className="pop" style={{ right: 0, top: 34, minWidth: 190 }}>
               <div className="small muted" style={{ marginBottom: 4 }}>{selected.size ? `${selected.size} selected` : `${view.length} in current view`}</div>
-              <div className="col" style={{ gap: 4 }}><button className="btn sm" onClick={() => exportData('csv')}>CSV file</button><button className="btn sm" onClick={() => exportData('json')}>JSON file</button></div>
+              <div className="col" style={{ gap: 4 }}><button className="btn sm" onClick={() => exportData('csv')}>CSV file</button><button className="btn sm" onClick={() => exportData('xlsx')}>Excel file (.xlsx)</button><button className="btn sm" onClick={() => exportData('json')}>JSON file</button></div>
             </div>
           )}
         </div>
@@ -404,14 +562,21 @@ export default function ContentPage({ openId, tableId = CONTENT_TABLE }: { openI
                 <div className="row" key={f.key} style={{ padding: '2px 0' }}>
                   <label className="chk grow"><input type="checkbox" checked={!hidden.includes(f.key)} onChange={(e) => setHidden(e.target.checked ? hidden.filter((h) => h !== f.key) : [...hidden, f.key])} /> {f.label}</label>
                   <span className="muted small">{FIELD_TYPE_LABEL[f.type]}</span>
+                  <code title="Click to copy this field’s key" style={{ cursor: 'copy', fontSize: 11 }} onClick={() => void copyText(f.key, `Key “${f.key}” copied.`)}>{f.key}</code>
+                  {!hidden.includes(f.key) && <>
+                    <IconBtn icon={<ChevronUp size={13} />} label={`Move ${f.label} up`} disabled={visibleFields.findIndex((x) => x.key === f.key) <= 0} onClick={() => void moveFieldIn(tableId, f.key, -1, visibleFields.map((x) => x.key))} />
+                    <IconBtn icon={<ChevronDown size={13} />} label={`Move ${f.label} down`} disabled={visibleFields.findIndex((x) => x.key === f.key) >= visibleFields.length - 1} onClick={() => void moveFieldIn(tableId, f.key, 1, visibleFields.map((x) => x.key))} />
+                  </>}
+                  <IconBtn icon={<Copy size={13} />} label={`Copy the settings of ${f.label}`} onClick={() => void copyText(describeField(f, linkName), `Settings of “${f.label}” copied.`)} />
+                  <IconBtn icon={<Pencil size={13} />} label={`Edit field ${f.label}`} onClick={() => { setEditField(f); setDlg('field'); setPanel(null); }} />
                   {!f.builtin && <>
-                    <IconBtn icon={<Pencil size={13} />} label={`Edit field ${f.label}`} onClick={() => { setEditField(f); setDlg('field'); setPanel(null); }} />
                     <IconBtn icon={<Trash2 size={13} />} label={`Delete field ${f.label}`} onClick={async () => { if (await confirmAction(`Delete field “${f.label}”?`, 'Its values are removed from every record.')) { await deleteFieldIn(tableId, f); notify('success', 'Field deleted.'); } }} />
                   </>}
                 </div>
               ))}
               <hr style={{ border: 0, borderTop: '1px solid var(--line)' }} />
               <button className="btn sm" onClick={() => { setEditField(undefined); setDlg('field'); setPanel(null); }}><Plus size={14} /> Add custom field</button>
+              <button className="btn sm" onClick={() => void copyText(describeTable(tname, records.length, fields.find((f) => f.key === masterKeyOf(tableId)), fields, linkName), 'Table structure copied. Paste it into your AI prompt.')}><Copy size={14} /> Copy table structure (for AI)</button>
             </div>
           )}
         </div>
@@ -448,9 +613,27 @@ export default function ContentPage({ openId, tableId = CONTENT_TABLE }: { openI
             <span>{view.length.toLocaleString()} of {records.length.toLocaleString()} records</span>
             {selected.size > 0 && <span>{selected.size} selected</span>}
             <span className="grow" />
-            <span>Click a cell · Shift+click / drag to select a range · Ctrl+C / Ctrl+V copy to and from a spreadsheet · right-click for more</span>
+            {fillInfo && <span style={{ color: 'var(--brand-dark)' }}>Release to fill {fillInfo.added} row{fillInfo.added === 1 ? '' : 's'}{fillInfo.created ? ` (${fillInfo.created} new record${fillInfo.created === 1 ? '' : 's'})` : ''}{fillSeriesNow ? ' counting numbers up' : ''}</span>}
+            <span>Click a cell · Shift+click / drag to select a range · drag the square at its corner to fill down (Shift or Ctrl counts numbers up) · Ctrl+C / Ctrl+V copy to and from a spreadsheet · right-click for more</span>
           </div>
         </div>
+        {formulaFor && (() => {
+          const rec = records.find((r) => r.id === formulaFor.id);
+          const f = fields.find((x) => x.key === formulaFor.key);
+          if (!rec || !f) return null;
+          return (
+            <FormulaDialog
+              title={`${f.type === 'currency' ? 'Amount' : 'Formula'} · ${f.label} · ${rowName(rec, tableId)}`}
+              initial={formulaFor.text ?? displayValue(getValue(rec, f.key))}
+              currency={f.type === 'currency' ? (f.currency ?? '$') : undefined}
+              recordId={rec.id}
+              evaluator={evaluator}
+              fields={fields}
+              onSave={(t) => void commit(rec, f, t)}
+              onClose={() => setFormulaFor(null)}
+            />
+          );
+        })()}
         {active && <RecordDrawer id={active} table={tableId} onClose={() => { setActive(null); if (openId) go(isC ? '#/content' : `#/table/${tableId}`); }} />}
       </div>
 
@@ -459,6 +642,10 @@ export default function ContentPage({ openId, tableId = CONTENT_TABLE }: { openI
           <button role="menuitem" onClick={() => void menuAction('open')}><Maximize2 size={14} /> Open record details</button>
           <button role="menuitem" onClick={() => void menuAction('edit')}><Pencil size={14} /> Edit cell <kbd>Enter</kbd></button>
           <hr />
+          {canMoveRows && targetRows().length === 1 && <>
+            <button role="menuitem" disabled={view.findIndex((r) => r.id === targetRows()[0].id) <= 0} onClick={() => { const id = targetRows()[0].id; setMenu(null); void moveRowIn(tableId, id, -1); }}><ChevronUp size={14} /> Move row up</button>
+            <button role="menuitem" disabled={view.findIndex((r) => r.id === targetRows()[0].id) >= view.length - 1} onClick={() => { const id = targetRows()[0].id; setMenu(null); void moveRowIn(tableId, id, 1); }}><ChevronDown size={14} /> Move row down</button>
+          </>}
           <button role="menuitem" onClick={() => void menuAction('copy')}><Copy size={14} /> Copy <kbd>Ctrl+C</kbd></button>
           <button role="menuitem" onClick={() => void menuAction('paste')}><ClipboardPaste size={14} /> Paste <kbd>Ctrl+V</kbd></button>
           <hr />
@@ -477,9 +664,18 @@ export default function ContentPage({ openId, tableId = CONTENT_TABLE }: { openI
           <button role="menuitem" onClick={() => { setSort({ key: fieldMenu.field.key, dir: 'asc' }); setFieldMenu(null); }}>Sort A → Z</button>
           <button role="menuitem" onClick={() => { setSort({ key: fieldMenu.field.key, dir: 'desc' }); setFieldMenu(null); }}>Sort Z → A</button>
           <button role="menuitem" onClick={() => { setHidden([...hidden, fieldMenu.field.key]); setFieldMenu(null); }}>Hide field</button>
+          {fieldMenu.field.sync && <div className="small muted" style={{ padding: '2px 10px 4px' }}>{(() => { const t = syncTarget(tableId, fieldMenu.field); return t ? `Linked to: ${t.table} → ${t.field}` : ''; })()}</div>}
+          {fieldMenu.field.key === masterKeyOf(tableId)
+            ? <div className="small muted" style={{ padding: '2px 10px 4px' }}>This is the Master Field.</div>
+            : fieldMenu.field.sync
+              ? <div className="small muted" style={{ padding: '2px 10px 4px' }}>A synced field cannot be the Master Field.</div>
+              : <button role="menuitem" onClick={async () => { const f = fieldMenu.field; setFieldMenu(null); try { await setMaster(tableId, f.key); notify('success', `“${f.label}” is now the Master Field.`); } catch (e) { notify('error', e instanceof Error ? e.message : String(e)); } }}>Set as Master Field</button>}
+          <hr />
+          <button role="menuitem" disabled={visibleFields.findIndex((x) => x.key === fieldMenu.field.key) <= 0} onClick={() => { const k = fieldMenu.field.key; setFieldMenu(null); void moveFieldIn(tableId, k, -1, visibleFields.map((x) => x.key)); }}><ChevronLeft size={14} /> Move left</button>
+          <button role="menuitem" disabled={visibleFields.findIndex((x) => x.key === fieldMenu.field.key) >= visibleFields.length - 1} onClick={() => { const k = fieldMenu.field.key; setFieldMenu(null); void moveFieldIn(tableId, k, 1, visibleFields.map((x) => x.key)); }}><ChevronRight size={14} /> Move right</button>
+          <button role="menuitem" onClick={() => { setEditField(fieldMenu.field); setDlg('field'); setFieldMenu(null); }}><Pencil size={14} /> {fieldMenu.field.builtin ? 'Edit name and choices…' : 'Edit field…'}</button>
+          <button role="menuitem" onClick={() => { const f = fieldMenu.field; setFieldMenu(null); void copyText(describeField(f, linkName), `Settings of “${f.label}” copied.`); }}><Copy size={14} /> Copy field settings</button>
           {!fieldMenu.field.builtin && <>
-            <hr />
-            <button role="menuitem" onClick={() => { setEditField(fieldMenu.field); setDlg('field'); setFieldMenu(null); }}><Pencil size={14} /> Edit field…</button>
             <button role="menuitem" className="danger-t" onClick={async () => {
               const f = fieldMenu.field; setFieldMenu(null);
               const deps = dependentsFor(tableId, f);

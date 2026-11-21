@@ -3,21 +3,23 @@ import { useLiveQuery } from 'dexie-react-hooks';
 import {
   ArrowLeft, Circle, Download, Eye, Frame, Grid3x3, Image as ImageIcon, Magnet, Maximize, Minus, MousePointer2, PenLine, Pentagon, Plus, Puzzle, Redo2, RotateCcw, Save, ScanEye, Square, Star, Type, Undo2,
 } from 'lucide-react';
-import { docToNjs, importAssetFiles, recordsStore } from '../db/repo';
+import { dataTableOf, importAssetFiles } from '../db/repo';
+import { rowName, useTableData } from '../db/tables';
 import { makeTemplateThumb } from '../db/thumb';
 import { db, type TemplateRow } from '../db/schema';
 import { saveTemplate } from '../db/repo';
 import { makeNode, syncPlaceholders } from '../engine/njs';
 import { listPlugins } from '../engine/plugins';
 import { AssetPicker } from '../ui/AssetPicker';
-import { Dialog, download, go, IconBtn, Spinner } from '../ui/kit';
+import { Dialog, go, IconBtn, Spinner } from '../ui/kit';
 import { Preview } from '../ui/Preview';
 import { confirmAction, notify, useStore } from '../ui/store';
-import { slugify } from '../engine/binding';
 import { EditorController, type ToolId } from './controller';
 import { Inspector } from './Inspector';
 import { Layers } from './Layers';
 import { TextOverlay } from './TextOverlay';
+import { RulerOverlay } from './Rulers';
+import { ExportMenu } from '../ui/ExportMenu';
 
 const TOOLS: { id: ToolId; label: string; key: string; icon: typeof Square }[] = [
   { id: 'select', label: 'Select', key: 'V', icon: MousePointer2 },
@@ -50,9 +52,10 @@ function Editor({ row }: { row: TemplateRow }) {
   const [issuesOpen, setIssuesOpen] = useState(false);
   const [pluginMenu, setPluginMenu] = useState(false);
   const [saving, setSaving] = useState(false);
-  const records = useStore(recordsStore, (s) => s.records);
   const s = useStore(ctrl.store, (x) => x);
   const doc = s.doc;
+  const dataTable = dataTableOf(doc);
+  const { records } = useTableData(dataTable);
 
   useEffect(() => {
     const host = hostRef.current!;
@@ -139,12 +142,12 @@ function Editor({ row }: { row: TemplateRow }) {
         <span className="vsep" />
         <IconBtn icon={<Eye size={16} />} label="Data preview — show real values from a record" on={s.previewOn} onClick={() => ctrl.setPreview(!s.previewOn)} />
         <select aria-label="Preview record" value={s.previewRecordId} onChange={(e) => ctrl.setPreviewRecord(e.target.value)} style={{ width: 170 }} disabled={records.length === 0}>
-          {records.slice(0, 400).map((r) => <option key={r.id} value={r.id}>{r.title}</option>)}
+          {records.slice(0, 400).map((r) => <option key={r.id} value={r.id}>{rowName(r, dataTable)}</option>)}
           {records.length === 0 && <option value="">No records</option>}
         </select>
         <button className="btn sm" onClick={() => setOutPrev(true)}><ScanEye size={14} /> Output preview</button>
         <span className="grow" />
-        <button className="btn sm" onClick={async () => { const text = await docToNjs(ctrl.doc()); download(new Blob([text], { type: 'application/json' }), `${slugify(doc.meta.name) || 'template'}.njs`); notify('success', 'Exported .njs (assets embedded).'); }}><Download size={14} /> .njs</button>
+        <ExportMenu doc={doc} recordId={s.previewOn ? s.previewRecordId : undefined} label="Download as…" className="btn sm"><Download size={14} /> Download</ExportMenu>
         <button className="btn primary sm" onClick={() => void save()} disabled={saving}><Save size={14} /> {saving ? 'Saving…' : 'Save'}</button>
       </div>
 
@@ -165,6 +168,7 @@ function Editor({ row }: { row: TemplateRow }) {
         <div className="ed-stage" onDragOver={(e) => e.preventDefault()} onDrop={onDrop}>
           <div className="canvas-host" ref={hostRef} data-testid="canvas-host" />
           <TextOverlay ctrl={ctrl} />
+          <RulerOverlay ctrl={ctrl} />
           {s.tool === 'pen' && <div className="callout" style={{ position: 'absolute', left: 12, top: 12 }}>Pen: click = corner point · click-and-drag = smooth curve{s.penPoints ? ` (${s.penPoints} points)` : ''} · double-click or Enter to finish · click the first point to close · Esc cancels</div>}
           {s.editingPath && (
             <div className="callout" style={{ position: 'absolute', left: 12, top: 12, maxWidth: 560, display: 'flex', gap: 8, alignItems: 'center' }} role="status">
@@ -172,7 +176,7 @@ function Editor({ row }: { row: TemplateRow }) {
               <button className="btn sm primary" onClick={() => ctrl.endPathEdit()}>Done</button>
             </div>
           )}
-          {s.previewOn && <div className="chip blue" style={{ position: 'absolute', right: 12, top: 12 }}>Data preview: {records.find((r) => r.id === s.previewRecordId)?.title ?? '—'}</div>}
+          {s.previewOn && <div className="chip blue" style={{ position: 'absolute', right: 12, top: 12 }}>Data preview: {(() => { const r = records.find((x) => x.id === s.previewRecordId); return r ? rowName(r, dataTable) : '—'; })()}</div>}
         </div>
         <Inspector ctrl={ctrl} />
       </div>
@@ -194,7 +198,7 @@ function Editor({ row }: { row: TemplateRow }) {
       {pickTarget && <AssetPicker current={pickTarget.src?.assetId} onPick={(id) => ctrl.updateNode(pickTarget.id, (n) => { n.src = { assetId: id }; })} onClose={() => ctrl.store.set({ imageTarget: null })} />}
       {outPrev && (
         <Dialog title="Output preview — exactly what the batch renderer produces" onClose={() => setOutPrev(false)} size="mid" foot={<button className="btn primary" onClick={() => setOutPrev(false)}>Close</button>}>
-          <label className="fld"><span>Record</span><select value={s.previewRecordId} onChange={(e) => ctrl.setPreviewRecord(e.target.value)}>{records.slice(0, 400).map((r) => <option key={r.id} value={r.id}>{r.title}</option>)}</select></label>
+          <label className="fld"><span>Record</span><select value={s.previewRecordId} onChange={(e) => ctrl.setPreviewRecord(e.target.value)}>{records.slice(0, 400).map((r) => <option key={r.id} value={r.id}>{rowName(r, dataTable)}</option>)}</select></label>
           <div style={{ display: 'flex', justifyContent: 'center' }}><Preview doc={doc} record={records.find((r) => r.id === s.previewRecordId)} width={560} /></div>
           {s.issues.length > 0 && <div className={`callout ${err ? 'err' : 'warn'}`}>{s.issues.map((i, k) => <div key={k}>{i.nodeName ? <b>{i.nodeName}: </b> : null}{i.message}</div>)}</div>}
         </Dialog>

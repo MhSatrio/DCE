@@ -1,6 +1,5 @@
 import { Plus, Trash2 } from 'lucide-react';
 import { uid } from '../engine/njs';
-import { STATUSES } from '../db/fields';
 import { NO_VALUE_OPS, OPERATOR_LABEL, type Condition, type FilterGroup, type Operator } from '../db/filter';
 import type { FieldDef } from '../db/schema';
 import { IconBtn } from './kit';
@@ -53,7 +52,7 @@ export function FilterBuilder(props: { value: FilterGroup; onChange: (g: FilterG
               f?.key === 'status' || f?.type === 'select' ? (
                 <select aria-label="Value" value={c.value} onChange={(e) => update(c.id, { value: e.target.value })} className="grow">
                   <option value="">—</option>
-                  {(f.key === 'status' ? STATUSES : f.options ?? []).map((o) => <option key={o} value={o}>{o}</option>)}
+                  {(f.options ?? []).map((o) => <option key={o} value={o}>{o}</option>)}
                 </select>
               ) : f?.type === 'boolean' ? (
                 <select aria-label="Value" value={c.value} onChange={(e) => update(c.id, { value: e.target.value })} className="grow"><option value="true">true</option><option value="false">false</option></select>

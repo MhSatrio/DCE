@@ -1,5 +1,6 @@
 import { db } from './db/schema';
 import { loadRecords } from './db/repo';
+import { syncAllCarousels } from './db/carousel';
 import { ensureSeeded } from './db/seed';
 import { encryptLegacy } from './db/connections';
 import { ensureJost, registerFontData } from './engine/fonts';
@@ -10,6 +11,7 @@ export async function boot(): Promise<void> {
   await db.open();
   await ensureSeeded();
   await loadRecords();
+  void syncAllCarousels().catch(() => undefined);   // the carousel tables follow their sources again
   await encryptLegacy().catch(() => undefined);
   try {
     for (const f of await db.fonts.toArray()) await registerFontData({ family: f.family, weight: f.weight, style: f.style, data: await f.blob.arrayBuffer() });

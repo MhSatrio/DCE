@@ -184,8 +184,19 @@ table.tbl tr:hover td { background: #f1f6fb; }
 .card-actions { display: flex; gap: 2px; padding: 4px 6px 6px; flex-wrap: wrap; }
 
 .split { display: grid; grid-template-columns: 1fr auto; gap: 12px; min-height: 0; flex: 1 1 auto; }
-.drawer { width: 460px; max-width: 46vw; background: var(--white); border: 1px solid var(--line-strong); border-radius: var(--radius); display: flex; flex-direction: column; min-height: 0; overflow: hidden; }
+.drawer { background: var(--white); border: 1px solid var(--line-strong); border-radius: var(--radius); display: flex; flex-direction: column; min-height: 0; overflow: hidden; }
 .drawer-body { overflow: auto; padding: 12px; display: flex; flex-direction: column; gap: 10px; flex: 1 1 auto; }
+/* Record details: wide enough to read and edit, each field's name above its input, and inputs at a readable size */
+.drawer { width: clamp(440px, 36vw, 620px); max-width: 94vw; }
+.drawer .panel-head h2 { font-size: 17px; }
+.drawer-body { padding: 16px 20px 24px; gap: 16px; }
+.drawer .fld { display: flex; flex-direction: column; gap: 6px; font-size: 13px; color: var(--muted); }
+.drawer .fld > span:first-child { font-size: 13px; font-weight: 600; color: var(--ink); }
+.drawer .fld > span:first-child code { font-size: 11.5px; font-weight: 400; }
+.drawer .fld input:not([type='checkbox']):not([type='radio']), .drawer .fld select, .drawer .fld textarea { width: 100%; min-height: 38px; padding: 8px 11px; font-size: 15px; }
+.drawer .fld textarea { min-height: 96px; line-height: 1.5; }
+.drawer .fld textarea.mono { font-size: 13px; }
+.drawer .fld .row input.grow { width: auto; flex: 1 1 auto; min-width: 0; }
 .drop { border: 2px dashed var(--line-strong); border-radius: var(--radius); padding: 14px; text-align: center; color: var(--muted); background: var(--white); }
 .drop.over { border-color: var(--brand); background: var(--sky); color: var(--brand-dark); }
 .progress { height: 8px; border-radius: 4px; background: var(--line); overflow: hidden; }
@@ -239,6 +250,10 @@ table.tbl tr:hover td { background: #f1f6fb; }
 .vgrid-scroll:focus { outline: none; }
 .vcell.in-sel { background: #dbeafe; }
 .vgrid-row.sel .vcell.in-sel { background: #cfe3f7; }
+/* fill handle: the square at the selection's bottom-right corner, and the rows a fill drag would add */
+.vcell.in-fill { background: #f0f7ff; box-shadow: inset 0 -2px 0 var(--brand); }
+.fill-handle { position: absolute; right: 2px; bottom: 2px; width: 9px; height: 9px; background: var(--brand); border: 1px solid #fff; border-radius: 1px; cursor: crosshair; z-index: 4; }
+.fill-handle:hover { transform: scale(1.3); }
 .vcell.is-active { box-shadow: inset 0 0 0 2px var(--brand); background: var(--white); }
 .vcell { user-select: none; }
 .vcell.chk { gap: 2px; }

@@ -1,6 +1,6 @@
 import { slugify } from '../engine/binding';
 import { uid } from '../engine/njs';
-import { coerce, BUILTIN_FIELDS, STATUSES } from './fields';
+import { allFields, coerce, BUILTIN_FIELDS, defaultValueOf } from './fields';
 import type { ContentRecord, FieldDef, FieldType } from './schema';
 
 export interface ColumnMapping {
@@ -52,6 +52,9 @@ export interface ImportPlan {
 }
 
 export function buildRecords(rows: string[][], mapping: ColumnMapping[], opts: ImportOptions): ImportPlan {
+  // the status choices and the default status come from the Status field, which the user can change
+  const statusChoices = allFields(opts.fields).find((f) => f.key === 'status')?.options ?? [];
+  const statusDefault = defaultValueOf(opts.fields, 'status');
   const now = Date.now();
   const customByKey = new Map(opts.fields.map((f) => [f.key, f]));
   const newFields: FieldDef[] = [];
@@ -86,7 +89,7 @@ export function buildRecords(rows: string[][], mapping: ColumnMapping[], opts: I
   rows.forEach((cells, idx) => {
     const rowNo = idx + 2; // 1-based, header is row 1
     const rec: ContentRecord = {
-      id: uid(), title: '', slug: '', status: 'Draft', publish_date: '', content: '', image_asset: '', template_ref: '',
+      id: uid(), title: '', slug: '', status: statusDefault, publish_date: '', content: '', image_asset: '', template_ref: '',
       tags: [], created_at: now, updated_at: now, data: {},
     };
     let any = false;
@@ -117,8 +120,8 @@ export function buildRecords(rows: string[][], mapping: ColumnMapping[], opts: I
     }
     if (!any) { empty++; return; }
     if (!rec.title.trim()) { errors.push({ row: rowNo, message: 'Title is empty' }); bad = true; }
-    if (!rec.status) rec.status = 'Draft';
-    else { const known = STATUSES.find((s) => s.toLowerCase() === rec.status.toLowerCase()); if (known) rec.status = known; }
+    if (!rec.status) rec.status = statusDefault;
+    else { const known = statusChoices.find((s) => s.toLowerCase() === rec.status.toLowerCase()); if (known) rec.status = known; }
     if (bad) return;
     if (!rec.slug) rec.slug = slugify(rec.title);
     let s = rec.slug, n = 2;

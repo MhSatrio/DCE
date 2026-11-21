@@ -1,12 +1,14 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { useLiveQuery } from 'dexie-react-hooks';
-import { ExternalLink, ImagePlus, Trash2, X } from 'lucide-react';
-import { coerce, displayValue, getValue, STATUSES } from '../../db/fields';
+import { Copy, ExternalLink, ImagePlus, Trash2, X } from 'lucide-react';
+import { coerce, displayValue, getValue } from '../../db/fields';
+import { isFormulaCell } from '../../db/formula';
 import { deleteRows, rowName, updateRow, useNameMaps, useTableData, isContent } from '../../db/tables';
 import { LinkPicker } from '../../ui/LinkPicker';
 import { db, type ContentRecord, type FieldDef } from '../../db/schema';
 import { slugify } from '../../engine/binding';
 import { AssetPicker } from '../../ui/AssetPicker';
+import { copyText } from '../../ui/clipboard';
 import { IconBtn, Tabs } from '../../ui/kit';
 import { Preview } from '../../ui/Preview';
 import { renderMarkdown } from '../../ui/markdown';
@@ -65,7 +67,16 @@ function FieldRow({ f, rec, table }: { f: FieldDef; rec: ContentRecord; table: s
   };
   if (f.readonly) return <label className="fld"><span>{f.label} <span className="muted" style={{ fontWeight: 400 }}>(automatic)</span></span><input readOnly value={['date', 'createdTime', 'modifiedTime'].includes(f.type) && val ? new Date(String(val)).toLocaleString() : displayValue(val)} /></label>;
   let control: React.ReactNode;
-  switch (f.type) {
+  if (isFormulaCell(f.type, val)) {
+    // the formula itself is shown and can be copied here (the cell copies its result)
+    control = (
+      <div className="row">
+        <input aria-label={f.label} className="grow" value={text} onChange={(e) => setText(e.target.value)} onBlur={commitText}
+          onKeyDown={(e) => e.key === 'Enter' && (e.target as HTMLInputElement).blur()} style={{ fontFamily: 'monospace' }} />
+        <IconBtn icon={<Copy size={14} />} label={`Copy the formula of ${f.label}`} onClick={() => void copyText(text.trim(), 'Formula copied.')} />
+      </div>
+    );
+  } else switch (f.type) {
     case 'markdown': control = <MarkdownEditor value={String(val ?? '')} onCommit={save} />; break;
     case 'longtext': case 'json': control = <textarea aria-label={f.label} rows={f.type === 'json' ? 4 : 3} value={text} onChange={(e) => setText(e.target.value)} onBlur={commitText} className={f.type === 'json' ? 'mono' : ''} />; break;
     case 'boolean': control = <label className="chk"><input aria-label={f.label} type="checkbox" checked={!!val} onChange={(e) => save(e.target.checked)} /> {val ? 'Yes' : 'No'}</label>; break;
@@ -73,7 +84,7 @@ function FieldRow({ f, rec, table }: { f: FieldDef; rec: ContentRecord; table: s
       control = (
         <select aria-label={f.label} value={String(val ?? '')} onChange={(e) => save(e.target.value)}>
           <option value="">—</option>
-          {(f.key === 'status' ? STATUSES : f.options ?? []).concat(val && !(f.key === 'status' ? STATUSES : f.options ?? []).includes(String(val)) ? [String(val)] : []).map((o) => <option key={o} value={o}>{o}</option>)}
+          {(f.options ?? []).concat(val && !(f.options ?? []).includes(String(val)) ? [String(val)] : []).map((o) => <option key={o} value={o}>{o}</option>)}
         </select>
       ); break;
     case 'multiselect': control = f.key === 'tags' ? <TagsEditor tags={rec.tags} onChange={(t) => save(t)} /> : <input aria-label={f.label} value={text} onChange={(e) => setText(e.target.value)} onBlur={commitText} placeholder="a; b; c" />; break;
@@ -117,7 +128,7 @@ function FieldRow({ f, rec, table }: { f: FieldDef; rec: ContentRecord; table: s
   }
   return (
     <div className="fld" role="group" aria-label={f.label}>
-      <span>{f.label} <code className="muted" style={{ fontWeight: 400 }}>{table === 'content' ? 'content.' : ''}{f.key}</code>{f.sync ? <span className="chip blue" style={{ marginLeft: 6 }}>synced</span> : null}</span>
+      <span>{f.label} <code className="muted" style={{ fontWeight: 400 }}>content.{f.key}</code>{f.sync ? <span className="chip blue" style={{ marginLeft: 6 }}>synced</span> : null}</span>
       {control}
       {err && <span style={{ color: 'var(--danger)' }}>{err}</span>}
     </div>

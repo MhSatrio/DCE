@@ -2,10 +2,14 @@ import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'reac
 import { useLiveQuery } from 'dexie-react-hooks';
 import { Archive, Download, History, Pause, Play, RefreshCw, Square, Trash2, TriangleAlert } from 'lucide-react';
 import { BatchRun, defaultConcurrency, foldRetryIntoParent, type RunState } from '../batch/runner';
+import { DestinationPanel } from './batch/DestinationPanel';
+import { DEFAULT_DEST, prepareDestination, type DestChoice } from '../batch/destination';
 import { exportBundle } from '../batch/bundle';
 import { allFields } from '../db/fields';
 import { activeConditions, queryRecords, type FilterGroup } from '../db/filter';
-import { recordsStore, renderDataFor } from '../db/repo';
+import { dataTableOf, renderDataFor } from '../db/repo';
+import { useTableData, tableName } from '../db/tables';
+import { CONTENT_TABLE } from '../db/constants';
 import { defaultBatchConfig } from '../db/seed';
 import { db, getSetting, setSetting, type BatchConfig, type ContentRecord, type JobRow } from '../db/schema';
 import { renderFilename } from '../engine/binding';
@@ -44,7 +48,7 @@ function JobDialog({ job, onClose, onRetry }: { job: JobRow; onClose: () => void
       <div className="small muted">Selection: {j.selectionLabel}</div>
       {j.failures.length === 0 ? <div className="callout">No failed records.</div> : (
         <>
-          <div className="callout warn">Fix the cause — edit the record in the Content Plan or the template in the editor — then retry only the failed records. Retries use the <b>current</b> data and template.</div>
+          <div className="callout warn">Fix the cause — edit the record in its table or the template in the editor — then retry only the failed records. Retries use the <b>current</b> data and template.</div>
           <div style={{ maxHeight: '45vh', overflow: 'auto' }}>
             <table className="tbl">
               <thead><tr><th>Record</th><th>Error</th></tr></thead>
@@ -59,12 +63,13 @@ function JobDialog({ job, onClose, onRetry }: { job: JobRow; onClose: () => void
 }
 
 export default function BatchPage() {
-  const records = useStore(recordsStore, (s) => s.records);
-  const customFields = useStore(recordsStore, (s) => s.fields);
-  const fields = useMemo(() => allFields(customFields), [customFields]);
   const templates = useLiveQuery(() => db.templates.orderBy('name').toArray(), [], []);
   const jobs = useLiveQuery(() => db.jobs.orderBy('started_at').reverse().limit(50).toArray(), [], []);
   const [cfg, setCfg] = useState<BatchConfig | null>(null);
+  // the records come from the table the template draws from (its Data tab); the batch has no database choice of its own
+  const tpl = (templates ?? []).find((t) => t.id === cfg?.templateId);
+  const table = dataTableOf(tpl?.doc);
+  const { records, fields } = useTableData(table);
   const [matched, setMatched] = useState<ContentRecord[]>([]);
   const [usedIndex, setUsedIndex] = useState<string | null>(null);
   const [pick, setPick] = useState<Set<string>>(new Set());
@@ -72,6 +77,7 @@ export default function BatchPage() {
   const [issues, setIssues] = useState<{ list: Issue[]; ms: number } | null>(null);
   const [run, setRun] = useState<BatchRun | null>(null);
   const [saveToDisk, setSaveToDisk] = useState(false);
+  const [dest, setDest] = useState<DestChoice>(DEFAULT_DEST);
   const [jobView, setJobView] = useState<JobRow | null>(null);
   const [busyBundle, setBusyBundle] = useState(false);
   const loaded = useRef(false);
@@ -90,8 +96,18 @@ export default function BatchPage() {
   }, []);
   useEffect(() => { if (cfg && loaded.current) void setSetting('batch.config', cfg); }, [cfg]);
 
-  const tpl = (templates ?? []).find((t) => t.id === cfg?.templateId);
   const patch = (p: Partial<BatchConfig>) => setCfg((c) => (c ? { ...c, ...p } : c));
+
+  // a filter condition on a field the table does not have would match nothing, so such conditions are dropped when the table changes
+  useEffect(() => {
+    if (!cfg) return;
+    const known = new Set(fields.map((f) => f.key));
+    const bad = cfg.filter.conditions.filter((c) => !known.has(c.field));
+    if (bad.length === 0) return;
+    patch({ filter: { ...cfg.filter, conditions: cfg.filter.conditions.filter((c) => known.has(c.field)) } });
+    notify('info', `Removed ${bad.length} filter condition${bad.length === 1 ? '' : 's'} on fields that “${tableName(table)}” does not have.`);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [table, fields]);
 
   // indexed query when the filter or the data changes
   const filterKey = JSON.stringify(cfg?.filter);
@@ -99,14 +115,14 @@ export default function BatchPage() {
     if (!cfg) return;
     let live = true;
     const t = setTimeout(async () => {
-      const r = await queryRecords(cfg.filter as FilterGroup);
+      const r = await queryRecords(cfg.filter as FilterGroup, table);
       if (!live) return;
       r.records.sort((a, b) => a.created_at - b.created_at);
       setMatched(r.records); setUsedIndex(r.usedIndex);
     }, 80);
     return () => { live = false; clearTimeout(t); };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [filterKey, records]);
+  }, [filterKey, records, table]);
 
   const chosen = useMemo(() => {
     if (!cfg) return [];
@@ -139,7 +155,10 @@ export default function BatchPage() {
         handle = await (window as unknown as { showSaveFilePicker: (o: unknown) => Promise<FileSystemFileHandle> }).showSaveFilePicker({ suggestedName: `${tpl.name.replace(/\W+/g, '-').toLowerCase()}.zip`, types: [{ description: 'ZIP archive', accept: { 'application/zip': ['.zip'] } }] });
       } catch { return; /* user cancelled the picker */ }
     }
-    const r = new BatchRun({ config: { ...cfg, concurrency: cfg.concurrency || defaultConcurrency() }, doc: tpl.doc, templateName: tpl.name, records: records2, selectionLabel: label, parentId, fileHandle: handle });
+    // the destination is checked before anything is rendered: a missing account or folder stops the run here
+    const prepared = await prepareDestination(dest, table);
+    if (prepared.error) { notify('error', prepared.error); return; }
+    const r = new BatchRun({ config: { ...cfg, concurrency: cfg.concurrency || defaultConcurrency() }, doc: tpl.doc, templateName: tpl.name, records: records2, table, selectionLabel: label, parentId, fileHandle: handle, destination: prepared.destination, keepZip: dest.keepZip });
     setRun(r);
     void r.start();
     void r.done.then(() => {
@@ -156,11 +175,12 @@ export default function BatchPage() {
     const tplRow = await db.templates.get(job.templateId);
     if (!tplRow) { notify('error', 'The template of this job no longer exists.'); return; }
     const ids = job.failures.map((f) => f.recordId);
-    const recs = (await db.records.bulkGet(ids)).filter((r): r is ContentRecord => !!r);
+    const jobTable = job.table ?? CONTENT_TABLE;
+    const recs = (await (jobTable === CONTENT_TABLE ? db.records : db.rows).bulkGet(ids)).filter((r): r is ContentRecord => !!r);
     if (recs.length < ids.length) notify('warn', `${ids.length - recs.length} failed record(s) were deleted and are skipped.`);
     if (!recs.length) return;
     if (!cfg) return;
-    const r = new BatchRun({ config: { ...job.config, concurrency: job.config.concurrency || defaultConcurrency() }, doc: tplRow.doc, templateName: tplRow.name, records: recs, selectionLabel: `Retry of ${fmtDate(job.started_at)}`, parentId: job.id });
+    const r = new BatchRun({ config: { ...job.config, concurrency: job.config.concurrency || defaultConcurrency() }, doc: tplRow.doc, templateName: tplRow.name, records: recs, table: jobTable, selectionLabel: `Retry of ${fmtDate(job.started_at)}`, parentId: job.id });
     setRun(r); void r.start();
     void r.done.then(() => { void foldRetryIntoParent(job.id, r); const s = r.store.get(); notify(s.failed ? 'warn' : 'success', `Retry finished: ${s.ok} succeeded, ${s.failed} still failing.`); });
   };
@@ -181,7 +201,7 @@ export default function BatchPage() {
             <div className="panel-head"><h2>1 · Source &amp; template</h2></div>
             <div className="panel-body col">
               <div className="grid2">
-                <label className="fld"><span>Database</span><select value="content_plan" onChange={() => undefined} aria-label="Source database"><option value="content_plan">Content Plan ({records.length.toLocaleString()} records)</option></select></label>
+                <div className="fld"><span>Records from</span><div className="small"><b>{tableName(table)}</b> <span className="muted">({records.length.toLocaleString()} records) — the table the template draws from; change it in the editor’s Data tab</span></div></div>
                 <label className="fld"><span>Template</span>
                   <select value={cfg.templateId} onChange={(e) => { const t = templates?.find((x) => x.id === e.target.value); patch({ templateId: e.target.value, ...(t ? { outW: t.width, outH: t.height } : {}) }); }} aria-label="Template">
                     {(templates ?? []).map((t) => <option key={t.id} value={t.id}>{t.name} ({t.width}×{t.height})</option>)}
@@ -270,6 +290,7 @@ export default function BatchPage() {
             </div>
           </section>
 
+          <DestinationPanel value={dest} onChange={setDest} batchTable={table} />
           <section className="panel">
             <div className="panel-head"><h2>4 · Render</h2></div>
             <div className="panel-body col">
