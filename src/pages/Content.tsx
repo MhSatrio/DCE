@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useLiveQuery } from 'dexie-react-hooks';
-import { ChevronDown, ChevronLeft, ChevronRight, ChevronUp, ClipboardPaste, Columns3, Copy, Download, FilePlus2, FileUp, Filter, FlaskConical, Maximize2, Pencil, Plus, Redo2, Search, Sigma, Trash2, Undo2, X, Zap } from 'lucide-react';
+import { Bookmark, ChevronDown, ChevronLeft, ChevronRight, ChevronUp, ClipboardPaste, Columns3, Copy, Download, FilePlus2, FileUp, Filter, FlaskConical, Maximize2, Pencil, Plus, Redo2, Search, Sigma, Trash2, Undo2, X, Zap } from 'lucide-react';
 import { toCsv } from '../db/csv';
 import { toXlsx } from '../db/xlsx';
 import { coerce, displayValue, FIELD_TYPE_LABEL, getValue } from '../db/fields';
@@ -30,6 +30,7 @@ import { ImportWizard } from './content/ImportWizard';
 import { RecordDrawer } from './content/RecordDrawer';
 import { copyRows, parseTsv, planPaste, toTsv, type Lookups } from './content/gridClipboard';
 import { fillGrid } from './content/fill';
+import { loadViews, removeView, sameState, saveViews, upsertView, type SavedView } from '../db/views';
 
 const DEFAULT_W: Record<string, number> = { title: 260, status: 110, publish_date: 120, image_asset: 170, template_ref: 170, tags: 170, slug: 190, description: 280, specs: 260, id: 280, created_at: 160, updated_at: 160, content: 240 };
 
@@ -127,7 +128,7 @@ export default function ContentPage({ openId, tableId = CONTENT_TABLE }: { openI
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [active, setActive] = useState<string | null>(openId ?? null);
   const [editing, setEditing] = useState<{ id: string; key: string } | null>(null);
-  const [panel, setPanel] = useState<null | 'filter' | 'cols' | 'export'>(null);
+  const [panel, setPanel] = useState<null | 'filter' | 'cols' | 'export' | 'views'>(null);
   const [dlg, setDlg] = useState<null | 'import' | 'field' | 'bulk' | 'demo'>(null);
   const [editField, setEditField] = useState<FieldDef | undefined>();
   const [pickFor, setPickFor] = useState<{ id: string; key: string } | null>(null);
@@ -145,8 +146,16 @@ export default function ContentPage({ openId, tableId = CONTENT_TABLE }: { openI
   const [fillPreview, setFillPreview] = useState<CellRange | null>(null);
   const [fillSeriesNow, setFillSeriesNow] = useState(false);
   const [menu, setMenu] = useState<{ x: number; y: number } | null>(null);
+  // saved views: a name for the search, filter, sort and hidden fields of this table (kept in this browser)
+  const savedViews = useLiveQuery(() => loadViews(tableId), [tableId], [] as SavedView[]);
+  const [viewName, setViewName] = useState('');
 
   useEffect(() => { if (openId) setActive(openId); }, [openId]);
+  const applyView = (v: SavedView) => { setQ(v.q); setFilter(structuredClone(v.filter)); setSort(v.sort ? { ...v.sort } : null); setHidden([...v.hidden]); setPanel(null); };
+  const saveCurrentView = async () => {
+    try { await saveViews(tableId, upsertView(savedViews ?? [], { name: viewName, q, filter, sort, hidden })); notify('success', `View “${viewName.trim()}” saved.`); setViewName(''); } catch (e) { notify('error', e instanceof Error ? e.message : String(e)); }
+  };
+  const resetView = () => { setQ(''); setFilter(emptyFilter()); setSort(isC ? { key: 'created_at', dir: 'desc' } : null); setHidden(fields.filter((f) => f.hiddenByDefault).map((f) => f.key)); setPanel(null); };
 
   const assetNames = useLiveQuery(async () => {
     const [names, ids] = await Promise.all([db.assets.orderBy('name').keys(), db.assets.orderBy('name').primaryKeys()]);
@@ -549,6 +558,28 @@ export default function ContentPage({ openId, tableId = CONTENT_TABLE }: { openI
       <div className="toolbar">
         <div className="search" style={{ margin: 0, width: 260 }}>
           <Search size={15} /><input type="search" placeholder="Search records" aria-label="Search records" value={q} onChange={(e) => setQ(e.target.value)} />
+        </div>
+        <div style={{ position: 'relative' }}>
+          {(() => {
+            const open = (savedViews ?? []).find((v) => sameState(v, { q, filter, sort, hidden }));
+            return <button className="btn" onClick={() => setPanel(panel === 'views' ? null : 'views')} aria-expanded={panel === 'views'} data-testid="views-button" title="Saved views: a name for the search, filter, sort and hidden fields"><Bookmark size={15} /> {open ? open.name : 'Views'}{(savedViews ?? []).length && !open ? ` (${(savedViews ?? []).length})` : ''}</button>;
+          })()}
+          {panel === 'views' && (
+            <div className="pop" style={{ left: 0, top: 34, width: 320 }} data-testid="views-pop">
+              {(savedViews ?? []).length === 0 && <div className="muted small" style={{ marginBottom: 6 }}>No saved views yet. Set a search, filter, sort or hidden fields, then save them under a name.</div>}
+              {(savedViews ?? []).map((v) => (
+                <div className="row" key={v.id} style={{ padding: '2px 0' }}>
+                  <button className="btn sm grow" style={{ textAlign: 'left' }} onClick={() => applyView(v)} aria-pressed={sameState(v, { q, filter, sort, hidden })}>{v.name}</button>
+                  <IconBtn icon={<Trash2 size={13} />} label={`Delete view ${v.name}`} onClick={() => void saveViews(tableId, removeView(savedViews ?? [], v.id))} />
+                </div>
+              ))}
+              <div className="row" style={{ marginTop: 8 }}>
+                <input className="grow" placeholder="Name for the current view" aria-label="Name for the current view" value={viewName} maxLength={60} onChange={(e) => setViewName(e.target.value)} onKeyDown={(e) => { if (e.key === 'Enter' && viewName.trim()) void saveCurrentView(); }} />
+                <button className="btn sm primary" disabled={!viewName.trim()} onClick={() => void saveCurrentView()}>Save</button>
+              </div>
+              <button className="btn sm" style={{ marginTop: 6 }} onClick={resetView}>Show everything (clear search, filter and sort)</button>
+            </div>
+          )}
         </div>
         <div style={{ position: 'relative' }}>
           <button className={`btn ${activeFilters ? 'primary' : ''}`} onClick={() => setPanel(panel === 'filter' ? null : 'filter')} aria-expanded={panel === 'filter'}><Filter size={15} /> Filter{activeFilters ? ` (${activeFilters})` : ''}</button>

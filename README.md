@@ -414,6 +414,12 @@ For either destination, the link of every file is written into the **Uploaded li
 
 **Tested.** End to end: `tests/e2e/template-export.mjs` (5 checks: the menu, each format's file type and size, the editor's menu with unsaved changes), `tests/e2e/ruler-guides.mjs` (6 checks: a guide from each ruler, the magnet stops an element on it and not on the grid, snapping off, a guide removed by dragging it back, guides not saved), and `tests/e2e/cloud.mjs` (7 checks, including an automation step that renders every record and uploads it to the mock R2).
 
+## Saved views (unreleased, after 1.23.1)
+
+The **Views** button next to the search box saves the current search, filter, sort and hidden fields of a table under a name. Opening a view restores all four; saving under the same name (any capitals) replaces it; the button shows the name of the view that is open. **Show everything** clears the search, filter and sort. A table can have up to 30 views. Views belong to this browser (they are kept in the app's settings, not in the table), so they do not change exports or what other tables see.
+
+**Tested.** `tests/unit/views.test.ts` (3) and `tests/e2e/views.mjs` (7 checks in the real app: save, clear, open, keep after a reload, replace by name, delete).
+
 ## Deleting a record with its files, one link at a time (1.23.1)
 
 A field can hold several links. Each one is read on its own: a comma, a semicolon, a space or a new line separates them, so a carousel record with four links has four files.
