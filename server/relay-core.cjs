@@ -22,6 +22,7 @@ const http = require('node:http');
 const dns = require('node:dns');
 const net = require('node:net');
 const zlib = require('node:zlib');
+const { createCloud } = require('./cloud.cjs');
 
 // ------------------------------------------------------------------------------------------------ polite fetching
 
@@ -125,6 +126,9 @@ function createFetcher(opts = {}) {
   }
 
   function rawGet(u) {
+    // an IP literal never reaches the DNS lookup below, so it is checked here too
+    const literal = u.hostname.replace(/^\[|\]$/g, '');
+    if (!allowPrivate && net.isIP(literal) && isPrivateIp(literal)) return Promise.reject(new Error('Refusing to connect to a private or local address.'));
     return new Promise((resolve, reject) => {
       const lib = u.protocol === 'http:' ? http : https;
       const req = lib.request(u, {
@@ -253,11 +257,124 @@ function createFetcher(opts = {}) {
 
 // ------------------------------------------------------------------------------------------------ the relay
 
+// ------------------------------------------------------------------------------------------------ images for the batch
+
+const IMAGE_MAX = 25 * 1024 * 1024;
+const IMAGE_TIMEOUT_MS = 30_000;
+const IMAGE_REDIRECTS = 5;
+const IMAGE_PER_HOST = 3;
+const IMAGE_UA = 'DCE-ImageFetch/1.0 (local desktop app; downloads the image linked in your records)';
+const PNG_SIG = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+const hostSlots = new Map();
+
+/** At most IMAGE_PER_HOST downloads at a time from one host. Resolves to the function that frees the slot. */
+function takeImageSlot(host) {
+  return new Promise((resolve) => {
+    const s = hostSlots.get(host) || { active: 0, queue: [] };
+    hostSlots.set(host, s);
+    const go = () => { s.active++; resolve(() => { s.active--; const next = s.queue.shift(); if (next) next(); }); };
+    if (s.active < IMAGE_PER_HOST) go(); else s.queue.push(go);
+  });
+}
+
+/** The kind of image the bytes are, judged from their first bytes only (never from the name or the server's type). */
+function sniffImage(buf) {
+  if (buf.length >= 3 && buf[0] === 0xff && buf[1] === 0xd8 && buf[2] === 0xff) return { kind: 'jpeg', mime: 'image/jpeg' };
+  if (buf.length >= 8 && buf.subarray(0, 8).equals(PNG_SIG)) return { kind: 'png', mime: 'image/png' };
+  if (buf.length >= 6) { const g = buf.toString('latin1', 0, 6); if (g === 'GIF87a' || g === 'GIF89a') return { kind: 'gif', mime: 'image/gif' }; }
+  if (buf.length >= 12 && buf.toString('latin1', 0, 4) === 'RIFF' && buf.toString('latin1', 8, 12) === 'WEBP') return { kind: 'webp', mime: 'image/webp' };
+  return null;
+}
+
+/** Why bytes that are not an accepted image were refused, in words for the person. */
+function imageRefusal(buf) {
+  const head = buf.subarray(0, 512).toString('utf8').trimStart().toLowerCase();
+  if (head.startsWith('<!doctype html') || head.startsWith('<html')) return 'The link leads to a web page, not to an image. Use the direct address of the image file.';
+  if (head.startsWith('<svg') || head.startsWith('<?xml')) return 'SVG files are not downloaded: they can contain scripts. Use a PNG, JPEG, WebP or GIF.';
+  if (buf.length >= 12 && buf.toString('latin1', 4, 8) === 'ftyp' && /avif|avis|heic|heix|mif1/.test(buf.toString('latin1', 8, 12))) return 'This image is AVIF or HEIC, which is not supported. Use a JPEG, PNG, WebP or GIF.';
+  return 'The file is not a JPEG, PNG, WebP or GIF image.';
+}
+
+const statusReason = (s) => {
+  if (s === 404) return 'The image was not found (HTTP 404). Check the address.';
+  if (s === 403) return 'The server refused to send the image (HTTP 403).';
+  if (s === 410) return 'The image has been removed (HTTP 410).';
+  if (s === 429) return 'The server is busy (HTTP 429). Try again later.';
+  if (s >= 500) return `The server had an error (HTTP ${s}). Try again later.`;
+  return `The server answered HTTP ${s}.`;
+};
+
+/** One GET of an image address. Private addresses are refused at connect time (after DNS), so no name can reach them. */
+function getImageOnce(u, allowPrivate) {
+  return new Promise((resolve, reject) => {
+    const lib = u.protocol === 'http:' ? http : https;
+    let settled = false;
+    const finish = (fn, v) => { if (!settled) { settled = true; fn(v); } };
+    // an IP literal never reaches the DNS lookup, so it is checked here
+    const literal = u.hostname.replace(/^\[|\]$/g, '');
+    if (!allowPrivate && net.isIP(literal) && isPrivateIp(literal)) { const e = new Error('private address'); e.code = 'PRIVATE'; return reject(e); }
+    const req = lib.request(u, {
+      method: 'GET', timeout: IMAGE_TIMEOUT_MS,
+      lookup: (hostname, options, cb) => dns.lookup(hostname, options, (err, address, family) => {
+        if (err) return cb(err);
+        const list = Array.isArray(address) ? address : [{ address, family }];
+        if (!allowPrivate && list.some((a) => isPrivateIp(a.address))) { const e = new Error('private address'); e.code = 'PRIVATE'; return cb(e); }
+        return Array.isArray(address) ? cb(null, address) : cb(null, address, family);
+      }),
+      headers: { 'user-agent': IMAGE_UA, accept: 'image/jpeg,image/png,image/webp,image/gif;q=0.9,*/*;q=0.1', 'accept-encoding': 'identity' },
+    }, (res) => {
+      const status = res.statusCode || 0;
+      if (status >= 300 && status < 400 && res.headers.location) { res.resume(); return finish(resolve, { status, location: res.headers.location }); }
+      if (status !== 200) { res.resume(); return finish(resolve, { status }); }
+      const chunks = []; let size = 0;
+      res.on('data', (c) => { size += c.length; if (size > IMAGE_MAX) { finish(resolve, { status, tooBig: true }); res.destroy(); } else chunks.push(c); });
+      res.on('end', () => finish(resolve, { status, body: Buffer.concat(chunks) }));
+      res.on('error', (e) => finish(reject, e));
+      res.on('aborted', () => finish(reject, new Error('the connection was closed')));
+    });
+    req.on('timeout', () => req.destroy(new Error(`no answer within ${IMAGE_TIMEOUT_MS / 1000} s`)));
+    req.on('error', (e) => finish(reject, e));
+    req.end();
+  });
+}
+
+/**
+ * Downloads one image for the batch: https only (http only in tests), no private address, at most 5 redirects, each one
+ * checked again, 30 s and 25 MB at most. Returns { ok, bytes, mime } or { ok: false, reason, retryable }.
+ */
+async function fetchImage(rawUrl, { allowPrivate = false, allowHttp = false } = {}) {
+  const fail = (reason, retryable = false) => ({ ok: false, reason, retryable });
+  let u;
+  try { u = new URL(String(rawUrl || '').trim()); } catch { return fail('The address is not a valid web address.'); }
+  for (let hop = 0; hop <= IMAGE_REDIRECTS; hop++) {
+    if (u.protocol !== 'https:' && !(allowHttp && u.protocol === 'http:')) return fail('Only https:// addresses can be downloaded.');
+    const release = await takeImageSlot(u.host);
+    let r;
+    try { r = await getImageOnce(u, allowPrivate); }
+    catch (e) {
+      release();
+      if (e && e.code === 'PRIVATE') return fail('The address points into a private network, which is not allowed.');
+      return fail(`The image could not be downloaded (${e instanceof Error ? e.message : String(e)}).`, true);
+    }
+    release();
+    if (r.location) { try { u = new URL(r.location, u); } catch { return fail('The server redirected to an invalid address.'); } continue; }
+    if (r.tooBig) return fail(`The image is larger than ${IMAGE_MAX / 1024 / 1024} MB.`);
+    if (r.status !== 200) return fail(statusReason(r.status), r.status === 429 || r.status >= 500);
+    const sniffed = sniffImage(r.body);
+    if (!sniffed) return fail(imageRefusal(r.body));
+    return { ok: true, bytes: r.body, mime: sniffed.mime };
+  }
+  return fail('The link redirects too many times.');
+}
+
 function createRelay(opts = {}) {
   const upstream = new URL(opts.upstream || 'https://api.buffer.com');
   const extra = opts.origins || [];
   const MAX_BODY = 1_000_000;
   const fetcher = createFetcher({ allowPrivate: opts.allowPrivateFetch, minDelayMs: opts.minDelayMs });
+  // cloud destinations (R2, Google Drive): the test options point Google at a local mock and allow plain http for it
+  const cloud = createCloud({ ...(opts.cloud || {}), allowHttp: !!opts.allowPrivateFetch });
+  const CLOUD_MAX = 40 * 1024 * 1024;
   const allowed = (o) => !!o && (/^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/.test(o) || extra.includes(o));
 
   return createServer((req, res) => {
@@ -272,12 +389,33 @@ function createRelay(opts = {}) {
     const json = (code, obj) => { res.writeHead(code, { 'content-type': 'application/json' }); res.end(JSON.stringify(obj)); };
     if (o && !allowed(o)) return json(403, { error: 'Origin not allowed.' });
     if (req.method === 'OPTIONS') { res.writeHead(204); return res.end(); }
-    if (req.method === 'GET' && req.url === '/health') return json(200, { ok: true, upstream: upstream.origin, features: ['buffer', 'fetch', 'http'] });
-    if (req.method !== 'POST' || (req.url !== '/buffer' && req.url !== '/fetch' && req.url !== '/http')) return json(404, { error: 'Not found. POST /buffer, POST /fetch, POST /http or GET /health.' });
+    if (req.method === 'GET' && req.url === '/health') return json(200, { ok: true, upstream: upstream.origin, features: ['buffer', 'fetch', 'http', 'cloud', 'image'] });
+    // the Google sign-in comes back here (127.0.0.1 only): the tokens wait in memory until the app takes them
+    if (req.method === 'GET' && req.url.startsWith('/google/callback')) {
+      const q = Object.fromEntries(new URL(req.url, 'http://127.0.0.1').searchParams);
+      return cloud.oauthCallback(q).then((r) => { res.writeHead(r.status, { 'content-type': 'text/html; charset=utf-8' }); res.end(r.html); });
+    }
+    if (req.method === 'POST' && req.url.startsWith('/cloud/')) {
+      const route = req.url.slice('/cloud'.length);
+      const chunks = []; let size = 0; let tooBig = false;
+      req.on('data', (c) => { size += c.length; if (size > CLOUD_MAX) { tooBig = true; req.destroy(); } else chunks.push(c); });
+      req.on('end', async () => {
+        if (res.writableEnded) return;
+        if (tooBig) return json(413, { ok: false, error: 'The file is larger than the 40 MB limit of one upload.' });
+        let p;
+        try { p = JSON.parse(Buffer.concat(chunks).toString('utf8') || '{}'); } catch { return json(400, { ok: false, error: 'The request body must be JSON.' }); }
+        p.host = req.headers.host || '';   // set by the server, never taken from the request body
+        try { return json(200, await cloud.handle(route, p)); }
+        catch (e) { return json(500, { ok: false, error: e instanceof Error ? e.message : String(e) }); }
+      });
+      return;
+    }
+    if (req.method !== 'POST' || (req.url !== '/buffer' && req.url !== '/fetch' && req.url !== '/http' && req.url !== '/image')) return json(404, { error: 'Not found. POST /buffer, POST /fetch, POST /http, POST /image or GET /health.' });
     const isFetch = req.url === '/fetch';
     const isApi = req.url === '/http';
+    const isImage = req.url === '/image';
     const auth = req.headers.authorization;
-    if (!isFetch && !isApi && (!auth || !/^Bearer\s+\S+$/.test(auth))) return json(401, { error: 'Missing Authorization: Bearer <Buffer API key>.' });
+    if (!isFetch && !isApi && !isImage && (!auth || !/^Bearer\s+\S+$/.test(auth))) return json(401, { error: 'Missing Authorization: Bearer <Buffer API key>.' });
 
     const chunks = []; let size = 0;
     req.on('data', (c) => { size += c.length; if (size > MAX_BODY) { json(413, { error: 'Body too large.' }); req.destroy(); } else chunks.push(c); });
@@ -296,6 +434,13 @@ function createRelay(opts = {}) {
         if (!p || typeof p.url !== 'string' || !Array.isArray(p.hosts)) return json(400, { ok: false, error: 'Body must be JSON: { url, hosts }.' });
         return json(200, await fetcher.fetchPage(p.url, p.hosts.filter((h) => typeof h === 'string')));
       }
+      if (isImage) {
+        let p;
+        try { p = JSON.parse(body.toString('utf8')); } catch { return json(400, { ok: false, error: 'Body must be JSON: { url }.' }); }
+        const got = await fetchImage(p && typeof p.url === 'string' ? p.url : '', { allowPrivate: !!opts.allowPrivateFetch, allowHttp: !!opts.allowPrivateFetch });
+        if (!got.ok) return json(200, { ok: false, error: got.reason, retryable: got.retryable });
+        return json(200, { ok: true, mime: got.mime, bytes: got.bytes.length, base64: got.bytes.toString('base64') });
+      }
       const send = upstream.protocol === 'http:' ? http.request : https.request;
       const up = send({
         hostname: upstream.hostname, port: upstream.port || undefined, path: upstream.pathname || '/', method: 'POST', timeout: 30_000,
@@ -311,4 +456,4 @@ function createRelay(opts = {}) {
   });
 }
 
-module.exports = { createRelay, createFetcher, parseRobots, robotsAllows, isPrivateIp, UA };
+module.exports = { createRelay, createFetcher, parseRobots, robotsAllows, isPrivateIp, UA, fetchImage, sniffImage };

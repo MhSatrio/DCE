@@ -1,4 +1,4 @@
-DYNAMIC CANVAS ENGINE  -  version 1.6.0
+DYNAMIC CANVAS ENGINE  -  version 1.23.1
 
 Free and open-source software (MIT License).
 Concept and product requirements (PRD): Muhammad Satrio.
