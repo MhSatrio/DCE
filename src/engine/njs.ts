@@ -15,7 +15,7 @@ export const uid = (): string =>
 
 const finite = z.number().refine(Number.isFinite, 'must be a finite number');
 
-const nodeSchema: z.ZodType<DceNode> = z.lazy(() =>
+export const nodeSchema: z.ZodType<DceNode> = z.lazy(() =>
   z.object({
     id: z.string().min(1),
     type: z.enum(['rect', 'ellipse', 'line', 'text', 'image', 'polygon', 'star', 'frame', 'path', 'group', 'plugin']),

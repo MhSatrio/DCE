@@ -8,6 +8,7 @@ import type { DceNode, Issue, NjsDoc, RenderData } from '../engine/types';
 import { createStore } from '../ui/store';
 import { DceObject, type DceHost } from './DceObject';
 import * as M from './model';
+import { decodeNodes, encodeNodes } from './clipboardNodes';
 import * as PH from './path';
 
 export type ToolId = 'select' | 'rect' | 'ellipse' | 'line' | 'text' | 'image' | 'polygon' | 'star' | 'frame' | 'pen';
@@ -70,6 +71,7 @@ export class EditorController implements DceHost {
   private disposed = false;
   private fitted = false;
   private pasteCount = 0;
+  private lastPasteText = '';
   private guideSeq = 0;
 
   constructor(doc: NjsDoc) {
@@ -137,6 +139,7 @@ export class EditorController implements DceHost {
     this.resizeObs.observe(host);
     window.addEventListener('keydown', this.keyDown);
     window.addEventListener('keyup', this.keyUp);
+    document.addEventListener('copy', this.onCopyEvent); document.addEventListener('cut', this.onCutEvent); document.addEventListener('paste', this.onPasteEvent);
     this.rebuild();
     this.resize();
     this.scheduleIssues();
@@ -150,6 +153,7 @@ export class EditorController implements DceHost {
     this.resizeObs?.disconnect();
     window.removeEventListener('keydown', this.keyDown);
     window.removeEventListener('keyup', this.keyUp);
+    document.removeEventListener('copy', this.onCopyEvent); document.removeEventListener('cut', this.onCutEvent); document.removeEventListener('paste', this.onPasteEvent);
     clearTimeout(this.issueTimer);
     void this.canvas?.dispose();
   }
@@ -705,12 +709,45 @@ export class EditorController implements DceHost {
     this.commit((d) => { created = M.duplicateNodes(d, ids); }, { rebuild: true });
     this.selectIds(created, { noExpand: true });
   }
-  copy(): void {
+  /** Copies the selection. From a menu (not a key press) the objects are also put on the system clipboard, as text. */
+  copy(viaEvent = false): void {
     const doc = this.doc();
     clipboard.nodes = M.topLevelSelection(doc, this.store.get().selection).map((n) => structuredClone(n));
     this.pasteCount = 0;
+    this.lastPasteText = encodeNodes(clipboard.nodes);
+    if (!viaEvent && clipboard.nodes.length) void navigator.clipboard?.writeText(this.lastPasteText).catch(() => undefined);
   }
-  cut(): void { this.copy(); this.deleteSelected(); }
+  cut(viaEvent = false): void { this.copy(viaEvent); this.deleteSelected(); }
+  // Ctrl+C / Ctrl+X / Ctrl+V go through the browser's clipboard events: no permission prompt, and objects copied in another tab,
+  // window or the installed app can be pasted here.
+  private clipboardBlocked(e: ClipboardEvent): boolean {
+    const t = e.target as HTMLElement | null;
+    const typing = !!t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.tagName === 'SELECT' || t.isContentEditable);
+    const s = this.store.get();
+    return typing || !!s.editingText || !!s.editingPath || !!document.querySelector('.scrim');
+  }
+  private onCopyEvent = (e: ClipboardEvent) => {
+    if (this.clipboardBlocked(e) || !this.store.get().selection.length) return;
+    this.copy(true);
+    e.clipboardData?.setData('text/plain', this.lastPasteText);
+    e.preventDefault();
+  };
+  private onCutEvent = (e: ClipboardEvent) => {
+    if (this.clipboardBlocked(e) || !this.store.get().selection.length) return;
+    this.cut(true);
+    e.clipboardData?.setData('text/plain', this.lastPasteText);
+    e.preventDefault();
+  };
+  private onPasteEvent = (e: ClipboardEvent) => {
+    if (this.clipboardBlocked(e)) return;
+    const nodes = decodeNodes(e.clipboardData?.getData('text/plain') ?? '');
+    if (!nodes) return; // not DCE objects: the page's own paste handlers (spreadsheet grids) are not involved in the editor
+    e.preventDefault();
+    const text = e.clipboardData!.getData('text/plain');
+    if (text !== this.lastPasteText) { this.pasteCount = 0; this.lastPasteText = text; } // a different payload starts its offset again
+    clipboard.nodes = nodes;
+    this.paste();
+  };
   paste(): void {
     if (!clipboard.nodes.length) return;
     this.pasteCount++;
@@ -833,9 +870,7 @@ export class EditorController implements DceHost {
       let handled = true;
       if (key === 'z' && !e.shiftKey) this.undo();
       else if (key === 'y' || (key === 'z' && e.shiftKey)) this.redo();
-      else if (key === 'c') this.copy();
-      else if (key === 'x') this.cut();
-      else if (key === 'v') this.paste();
+      else if (key === 'c' || key === 'x' || key === 'v') handled = false; // the browser's copy / cut / paste events do these (see onCopyEvent)
       else if (key === 'd') this.duplicate();
       else if (key === 'a') this.selectAll();
       else if (key === 'g' && e.shiftKey) this.ungroup();

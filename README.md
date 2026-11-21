@@ -420,6 +420,12 @@ The **Views** button next to the search box saves the current search, filter, so
 
 **Tested.** `tests/unit/views.test.ts` (3) and `tests/e2e/views.mjs` (7 checks in the real app: save, clear, open, keep after a reload, replace by name, delete).
 
+## Design objects on the system clipboard (unreleased, after 1.23.1)
+
+Ctrl+C, Ctrl+X and Ctrl+V in the editor now use the browser's clipboard events. The copied objects are put on the clipboard as text (a small JSON document), so they can be pasted into **another template, another browser tab or window, or the installed app**; the first paste is offset by 24 px and each further paste of the same copy by another 24 px. Text that is not a DCE payload is ignored, and a pasted payload is checked against the same schema as a saved design (at most 500 objects) before anything is added. An image object keeps the id of its library asset: pasted into a browser that does not have that asset it shows the usual missing-image handling. Pasting an *image file* from the operating system is not supported yet.
+
+**Tested.** `tests/unit/clipboard-nodes.test.ts` (4) and `tests/e2e/clipboard-objects.mjs` (copy in one window, paste into another window, foreign and damaged text ignored, the older Ctrl+C/Ctrl+V still works); the editor suite (30 checks) still passes.
+
 ## Deleting a record with its files, one link at a time (1.23.1)
 
 A field can hold several links. Each one is read on its own: a comma, a semicolon, a space or a new line separates them, so a carousel record with four links has four files.
