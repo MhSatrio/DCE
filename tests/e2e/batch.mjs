@@ -85,7 +85,7 @@ await check('import CSV: map columns, validate, reject bad rows, import good one
 
 await check('inline edit: double-click a cell, type, Enter → persisted', async () => {
   const row = page.locator('.vgrid-row', { hasText: 'Fume Hood' });
-  await row.locator('[role=gridcell]').first().locator('div').first().dblclick();
+  await row.locator('[role=gridcell]:not(.chk)').first().locator('div').first().dblclick();
   const input = page.getByLabel('Title', { exact: true }).last();
   await input.fill('Fume Hood XL');
   await input.press('Enter');
@@ -96,19 +96,19 @@ await check('inline edit: double-click a cell, type, Enter → persisted', async
 
 await check('one click selects a cell — it does NOT open the detail panel (so spreadsheet copy/paste works)', async () => {
   await page.getByLabel('Search records').fill('');
-  const cell = page.locator('.vgrid-row').nth(1).locator('[role=gridcell]').nth(0);
+  const cell = page.locator('.vgrid-row').nth(1).locator('[role=gridcell]:not(.chk)').nth(0);
   await cell.click();
   eq(await page.locator('aside[aria-label="Record details"]').count(), 0);
   eq(await page.locator('.vcell.is-active').count(), 1);
-  await page.locator('.vgrid-row').nth(2).locator('[role=gridcell]').nth(1).click({ modifiers: ['Shift'] });
+  await page.locator('.vgrid-row').nth(2).locator('[role=gridcell]:not(.chk)').nth(1).click({ modifiers: ['Shift'] });
   ok((await page.locator('.vcell.in-sel').count()) === 4, 'a 2 × 2 range is highlighted');
 });
 
 await check('keyboard: arrows move the cell, Enter edits and steps down, Escape cancels', async () => {
-  await page.locator('.vgrid-row').nth(0).locator('[role=gridcell]').nth(0).click();
+  await page.locator('.vgrid-row').nth(0).locator('[role=gridcell]:not(.chk)').nth(0).click();
   await page.keyboard.press('ArrowDown');
   await page.keyboard.press('ArrowRight');
-  const row1 = await page.locator('.vgrid-row').nth(1).locator('[role=gridcell]').nth(1).getAttribute('class');
+  const row1 = await page.locator('.vgrid-row').nth(1).locator('[role=gridcell]:not(.chk)').nth(1).getAttribute('class');
   ok(/is-active/.test(row1), 'active cell moved to row 2, column 2');
   await page.keyboard.press('Enter');
   await page.getByLabel('Status').last().waitFor();
@@ -118,8 +118,8 @@ await check('keyboard: arrows move the cell, Enter edits and steps down, Escape 
 });
 
 await check('copy a range → TSV on the clipboard that Excel / Google Sheets / LibreOffice can paste', async () => {
-  await page.locator('.vgrid-row').nth(0).locator('[role=gridcell]').nth(0).click();
-  await page.locator('.vgrid-row').nth(1).locator('[role=gridcell]').nth(2).click({ modifiers: ['Shift'] });
+  await page.locator('.vgrid-row').nth(0).locator('[role=gridcell]:not(.chk)').nth(0).click();
+  await page.locator('.vgrid-row').nth(1).locator('[role=gridcell]:not(.chk)').nth(2).click({ modifiers: ['Shift'] });
   await page.keyboard.press('Control+c');
   await page.waitForSelector('text=/Copied 2 rows × 3 columns/');
   const text = await page.evaluate(() => navigator.clipboard.readText());
@@ -136,7 +136,7 @@ await check('paste a spreadsheet block: values are validated, extra rows become 
   await page.getByLabel('Search records').fill('New record');
   await page.waitForTimeout(400);
   eq(await page.locator('.vgrid-row').count(), 1);
-  await page.locator('.vgrid-row').first().locator('[role=gridcell]').nth(0).click();
+  await page.locator('.vgrid-row').first().locator('[role=gridcell]:not(.chk)').nth(0).click();
   const T = String.fromCharCode(9), CRLF = String.fromCharCode(13, 10);
   await page.evaluate((t) => navigator.clipboard.writeText(t), 'Pasted One' + T + 'Approved' + CRLF + 'Pasted Two' + T + 'Bogus status' + CRLF);
   await page.keyboard.press('Control+v');
@@ -153,24 +153,24 @@ await check('paste a spreadsheet block: values are validated, extra rows become 
 await check('right-click menu: open details, copy, paste, duplicate, delete (with confirmation)', async () => {
   await page.getByLabel('Search records').fill('Pasted');
   await page.waitForTimeout(400);
-  await page.locator('.vgrid-row').nth(0).locator('[role=gridcell]').nth(0).click();
-  await page.locator('.vgrid-row').nth(0).locator('[role=gridcell]').nth(0).click({ button: 'right' });
+  await page.locator('.vgrid-row').nth(0).locator('[role=gridcell]:not(.chk)').nth(0).click();
+  await page.locator('.vgrid-row').nth(0).locator('[role=gridcell]:not(.chk)').nth(0).click({ button: 'right' });
   const items = await page.getByRole('menu', { name: 'Cell menu' }).getByRole('menuitem').allInnerTexts();
   ok(['Open record details', 'Edit cell', 'Copy', 'Paste', 'Duplicate record', 'Delete record'].every((w) => items.some((i) => i.startsWith(w))), items.join(' | '));
   await page.getByRole('menuitem', { name: /Open record details/ }).click();
   await page.waitForSelector('aside[aria-label="Record details"]');
   await page.getByRole('button', { name: 'Close details' }).click();
   // duplicate both, then delete all four through the menu
-  await page.locator('.vgrid-row').nth(0).locator('[role=gridcell]').nth(0).click();
-  await page.locator('.vgrid-row').nth(1).locator('[role=gridcell]').nth(0).click({ modifiers: ['Shift'] });
-  await page.locator('.vgrid-row').nth(1).locator('[role=gridcell]').nth(0).click({ button: 'right' });
+  await page.locator('.vgrid-row').nth(0).locator('[role=gridcell]:not(.chk)').nth(0).click();
+  await page.locator('.vgrid-row').nth(1).locator('[role=gridcell]:not(.chk)').nth(0).click({ modifiers: ['Shift'] });
+  await page.locator('.vgrid-row').nth(1).locator('[role=gridcell]:not(.chk)').nth(0).click({ button: 'right' });
   await page.getByRole('menuitem', { name: /Duplicate 2 records/ }).click();
   await page.waitForSelector('text=/Duplicated 2 records/');
   await page.waitForTimeout(400);
   eq(await page.locator('.vgrid-row').count(), 4);
-  await page.locator('.vgrid-row').nth(0).locator('[role=gridcell]').nth(0).click();
-  await page.locator('.vgrid-row').nth(3).locator('[role=gridcell]').nth(0).click({ modifiers: ['Shift'] });
-  await page.locator('.vgrid-row').nth(3).locator('[role=gridcell]').nth(0).click({ button: 'right' });
+  await page.locator('.vgrid-row').nth(0).locator('[role=gridcell]:not(.chk)').nth(0).click();
+  await page.locator('.vgrid-row').nth(3).locator('[role=gridcell]:not(.chk)').nth(0).click({ modifiers: ['Shift'] });
+  await page.locator('.vgrid-row').nth(3).locator('[role=gridcell]:not(.chk)').nth(0).click({ button: 'right' });
   await page.getByRole('menuitem', { name: /Delete 4 records/ }).click();
   await page.waitForSelector('text=/Delete 4 records\\?/');
   await page.getByRole('dialog').getByRole('button', { name: 'Delete', exact: true }).click();
@@ -306,7 +306,7 @@ await check('assets: non-image and oversized input are rejected with a message',
 await check('template .njs export → import round-trips the design exactly', async () => {
   await page.goto(t.url + '/#/templates');
   await page.waitForSelector('.card');
-  await page.getByRole('button', { name: 'Download as…' }).first().click();
+  await page.getByRole('button', { name: 'Download as…' }).first().click();
   const [dl] = await Promise.all([page.waitForEvent('download'), page.getByRole('menuitem', { name: '.njs design file', exact: true }).click()]);
   const file = await dl.path();
   const original = JSON.parse(readFileSync(file, 'utf8'));
@@ -474,7 +474,7 @@ await check('failed records: error shown, fix the data, retry only the failures'
   await page.getByLabel('Search records').fill('Vortex Mixer');
   await page.waitForTimeout(300);
   const row = page.locator('.vgrid-row', { hasText: 'Vortex Mixer' }).first();
-  await row.locator('[role=gridcell]').first().locator('div').first().dblclick();
+  await row.locator('[role=gridcell]:not(.chk)').first().locator('div').first().dblclick();
   const input = page.getByLabel('Title', { exact: true }).last();
   await input.fill(''); await input.press('Enter');
   await waitIdle(page, 300);
@@ -504,7 +504,7 @@ await check('failed records: error shown, fix the data, retry only the failures'
   await page.getByLabel('Search records').fill('vortex-mixer');
   await page.waitForTimeout(300);
   const row2 = page.locator('.vgrid-row').first();
-  await row2.locator('[role=gridcell]').first().locator('div').first().dblclick();
+  await row2.locator('[role=gridcell]:not(.chk)').first().locator('div').first().dblclick();
   const in2 = page.getByLabel('Title', { exact: true }).last();
   await in2.fill('Vortex Mixer'); await in2.press('Enter');
   await waitIdle(page, 300);

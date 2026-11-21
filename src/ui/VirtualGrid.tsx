@@ -69,7 +69,7 @@ function RowInner<R>(p: RowProps<R>) {
   const cell = p.cell;
   return (
     <div className={`vgrid-row ${p.sel ? 'sel' : ''} ${p.open ? 'active' : ''}`} style={{ top: p.top, height: p.h }} role="row" aria-selected={p.sel}>
-      <div className="vcell chk" style={{ width: p.chk, gap: 2, position: 'sticky', left: 0, zIndex: 3, background: 'inherit' }}>
+      <div className="vcell chk" role="gridcell" style={{ width: p.chk, gap: 2, position: 'sticky', left: 0, zIndex: 3, background: 'inherit' }}>
         <input type="checkbox" aria-label="Select row" checked={p.sel} onChange={() => undefined} onClick={(e) => p.onToggleSelect(p.id, p.index, (e as unknown as MouseEvent).shiftKey)} />
         {cell && (
           <button className="rowopen" aria-label="Open record details" data-tip="Open details" data-tip-pos="right" onClick={() => cell.onExpand(p.id)}><Maximize2 size={12} /></button>
@@ -181,7 +181,7 @@ export function VirtualGrid<R>(p: Props<R>) {
       onKeyDown={p.cell?.onKeyDown} onCopy={p.cell?.onCopy} onPaste={p.cell?.onPaste}
     >
       <div className="vgrid-head" style={{ height: 32, width }} role="row">
-        <div className="vhead chk" style={{ width: CHK, position: 'sticky', left: 0, zIndex: 3, background: 'inherit' }}>
+        <div className="vhead chk" role="columnheader" aria-label="Select" style={{ width: CHK, position: 'sticky', left: 0, zIndex: 3, background: 'inherit' }}>
           <input type="checkbox" aria-label="Select all rows" checked={allSel} onChange={(e) => p.onToggleAll(e.target.checked)} />
         </div>
         {p.cols.map((c) => (
@@ -198,12 +198,12 @@ export function VirtualGrid<R>(p: Props<R>) {
           </div>
         ))}
         {p.onAddField && (
-          <div className="vhead add" style={{ width: ADD, justifyContent: 'center', padding: 0 }}>
+          <div className="vhead add" role="columnheader" aria-label="Add field" style={{ width: ADD, justifyContent: 'center', padding: 0 }}>
             <button className="addfield" aria-label="Add field" data-tip="Add a field" onClick={p.onAddField}><Plus size={15} /></button>
           </div>
         )}
       </div>
-      <div style={{ position: 'relative', height: total * H, width }}>
+      <div role="rowgroup" style={{ position: 'relative', height: total * H, width }}>
         {total === 0 && p.empty}
         {p.rows.slice(start, end).map((r, i) => {
           const id = p.rowId(r);

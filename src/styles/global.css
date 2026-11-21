@@ -9,7 +9,7 @@
   --bg: #f6f8fa;
   --line: #e8edf3;
   --line-strong: #d3dce8;
-  --muted: #64748b;
+  --muted: #526072;
   --hover: #dce5f0;
   --danger: #b3261e;
   --danger-bg: #fdecea;
@@ -299,3 +299,6 @@ table.tbl tr:hover td { background: #f1f6fb; }
 .chan-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; padding: 6px 8px; border: 1px solid var(--line); border-radius: var(--radius); }
 .chan-row.stale { opacity: .8; border-style: dashed; }
 @media (prefers-reduced-motion: reduce) { .run-dot { animation: none; } }
+
+.btn.primary .small, .btn.primary .muted { color: #fff; }
+.btn.primary .small, .btn.primary .muted { opacity: 1 !important; }

@@ -151,10 +151,10 @@ await check('tables: create a custom table from the sidebar; add a Currency fiel
 await check('tables: rows are edited like a spreadsheet; every Airtable-style field type can be created', async () => {
   await page.getByRole('button', { name: 'New row' }).click();
   await page.waitForSelector('.vgrid-row');
-  await page.locator('.vgrid-row').first().locator('[role=gridcell]').nth(0).dblclick();
+  await page.locator('.vgrid-row').first().locator('[role=gridcell]:not(.chk)').nth(0).dblclick();
   await page.getByLabel('Name').last().fill('Acme Lab');
   await page.keyboard.press('Enter');
-  await page.locator('.vgrid-row').first().locator('[role=gridcell]').nth(1).dblclick();
+  await page.locator('.vgrid-row').first().locator('[role=gridcell]:not(.chk)').nth(1).dblclick();
   await page.getByLabel('Price', { exact: true }).last().fill('1200');
   await page.keyboard.press('Enter');
   await waitIdle(page, 300);
@@ -193,9 +193,9 @@ await check('link fields are two-sided; a synced field mirrors in BOTH direction
   const a = fields.find((f) => f.label === 'Products' && f.tableId), b = fields.find((f) => f.type === 'link' && !f.tableId);
   ok(b && b.label === 'Suppliers' && b.linkTable === a.tableId && b.inverseKey === a.key && a.inverseKey === b.key, 'inverse field created in the Content Plan');
   // link the first supplier row to a product through the cell editor
-  const cols = await page.locator('.vhead[role=columnheader]').allInnerTexts();
+  const cols = await page.locator('.vhead[role=columnheader]:not(.chk):not(.add)').allInnerTexts();
   const ci = cols.findIndex((c) => c.startsWith('Products'));
-  await page.locator('.vgrid-row').first().locator('[role=gridcell]').nth(ci).dblclick();
+  await page.locator('.vgrid-row').first().locator('[role=gridcell]:not(.chk)').nth(ci).dblclick();
   await page.getByRole('checkbox', { name: 'Laboratory Centrifuge' }).check();
   await page.getByRole('button', { name: 'Save links' }).click();
   await waitIdle(page, 400);
@@ -220,7 +220,7 @@ await check('link fields are two-sided; a synced field mirrors in BOTH direction
   // change in table A (Suppliers) → table B (Content Plan) follows
   await page.goto(t.url + '/#/table/' + a.tableId);
   await page.waitForSelector('.vgrid-row');
-  await page.locator('.vgrid-row').first().locator('[role=gridcell]').nth(1).dblclick();
+  await page.locator('.vgrid-row').first().locator('[role=gridcell]:not(.chk)').nth(1).dblclick();
   await page.getByLabel('Price', { exact: true }).last().fill('1500');
   await page.keyboard.press('Enter');
   await waitIdle(page, 400);
@@ -230,9 +230,9 @@ await check('link fields are two-sided; a synced field mirrors in BOTH direction
   await page.waitForSelector('.vgrid-row');
   await page.getByLabel('Search records').fill('Laboratory Centrifuge');
   await page.waitForTimeout(400);
-  const heads = await page.locator('.vhead[role=columnheader]').allInnerTexts();
+  const heads = await page.locator('.vhead[role=columnheader]:not(.chk):not(.add)').allInnerTexts();
   const si = heads.findIndex((h) => h.startsWith('Supplier price'));
-  await page.locator('.vgrid-row').first().locator('[role=gridcell]').nth(si).dblclick();
+  await page.locator('.vgrid-row').first().locator('[role=gridcell]:not(.chk)').nth(si).dblclick();
   await page.getByLabel('Supplier price', { exact: true }).last().fill('1700');
   await page.keyboard.press('Enter');
   await waitIdle(page, 500);
@@ -242,9 +242,9 @@ await check('link fields are two-sided; a synced field mirrors in BOTH direction
 });
 
 await check('deleting a link field warns about what depends on it and removes the inverse + synced copies', async () => {
-  const heads = await page.locator('.vhead[role=columnheader]').allInnerTexts();
+  const heads = await page.locator('.vhead[role=columnheader]:not(.chk):not(.add)').allInnerTexts();
   const hi = heads.findIndex((h) => h.startsWith('Suppliers'));
-  await page.locator('.vhead[role=columnheader]').nth(hi).click({ button: 'right' });
+  await page.locator('.vhead[role=columnheader]:not(.chk):not(.add)').nth(hi).click({ button: 'right' });
   await page.getByRole('menuitem', { name: /Delete field/ }).click();
   const body = await page.getByRole('dialog').innerText();
   ok(/Supplier price/.test(body) && /Products/.test(body), 'dependents listed: ' + body.slice(0, 160));
@@ -260,7 +260,7 @@ const setStatus = async (title, status) => {
   await page.waitForSelector('.vgrid-row');
   await page.getByLabel('Search records').fill(title);
   await page.waitForTimeout(400);
-  await page.locator('.vgrid-row').first().locator('[role=gridcell]').nth(1).dblclick();
+  await page.locator('.vgrid-row').first().locator('[role=gridcell]:not(.chk)').nth(1).dblclick();
   await page.getByLabel('Status').last().selectOption(status);
   await waitIdle(page, 300);
   await page.getByLabel('Search records').fill('');
